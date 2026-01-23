@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ambient Calendar Assistant</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <!-- Get Started View - shown when setup is incomplete -->
+    <div id="get-started-view" class="view">
+      <div class="get-started-header">
+        <img src="../icons/ambient_256.png" alt="Ambient" class="get-started-icon">
+        <h1>Welcome to Ambient Calendar Assistant</h1>
+        <p class="get-started-subtitle">Add events from your text messages to your calendar automatically.</p>
+      </div>
+
+      <div class="setup-progress">
+        <p class="setup-progress-label">Complete setup to get started:</p>
+        <div class="setup-steps">
+          <div class="setup-step" id="step-name">
+            <span class="step-indicator"></span>
+            <span class="step-label">Your Name</span>
+          </div>
+          <div class="setup-step" id="step-ai-provider">
+            <span class="step-indicator"></span>
+            <span class="step-label">AI Provider</span>
+          </div>
+          <div class="setup-step" id="step-calendar">
+            <span class="step-indicator"></span>
+            <span class="step-label">Calendar</span>
+          </div>
+        </div>
+      </div>
+
+      <section class="settings get-started-settings">
+        <div class="setting-row">
+          <label for="user-name">Your Name</label>
+          <input type="text" id="user-name" placeholder="e.g., Bobby">
+          <button id="save-name-btn" class="save-btn">Save</button>
+        </div>
+        <p class="setting-hint">Your name as it appears to others in messages (used for AI context)</p>
+        
+        <!-- AI Provider Selection -->
+        <div class="setting-group ai-provider-group">
+          <label class="setting-group-label">AI Provider</label>
+          
+          <div class="provider-option">
+            <label class="radio-label">
+              <input type="radio" name="ai-provider" id="provider-ambient" value="ambient_ai">
+              <span class="radio-text">Use AmbientAI</span>
+            </label>
+            <div class="provider-info" id="ambient-info">
+              <p class="info-text">Data is sent to AmbientAI who does not store the data and then passes it to Gemini with a paid tier. Google logs prompts and responses for a limited period of time, solely for the purpose of detecting violations of the Prohibited Use Policy.</p>
+              <a href="https://tryambientai.com/privacy/" target="_blank" class="info-link">View Ambient's Privacy Policy</a>
+              <a href="https://ai.google.dev/gemini-api/terms#paid-services" target="_blank" class="info-link">View Google's Paid Services Terms</a>
+            </div>
+          </div>
+          
+          <div class="provider-option">
+            <label class="radio-label">
+              <input type="radio" name="ai-provider" id="provider-gemini" value="gemini_key" checked>
+              <span class="radio-text">Use my Gemini API key</span>
+            </label>
+            <div class="provider-info" id="gemini-info">
+              <p class="info-text">Free tier API keys allow Google to train on any data passed to it. Google's instructions are "Do not submit sensitive, confidential, or personal information to the Unpaid Services".</p>
+              <a href="https://ai.google.dev/gemini-api/terms" target="_blank" class="info-link">View Google's API Terms</a>
+              <a href="https://aistudio.google.com/apikey" target="_blank" class="info-link">Get a Gemini API key</a>
+            </div>
+            <!-- API Key input (only shown when "Use my Gemini API key" is selected) -->
+            <div id="gemini-key-section" class="gemini-key-section">
+              <div class="setting-row" id="api-key-input-row">
+                <label for="api-key">API Key</label>
+                <input type="password" id="api-key" placeholder="AIza...">
+                <button id="save-key-btn" class="save-btn">Save</button>
+              </div>
+              <p class="setting-error" id="api-key-error"></p>
+              <div class="setting-row" id="api-key-display-row" style="display: none;">
+                <label>API Key</label>
+                <span class="api-key-masked">**********</span>
+                <button id="delete-key-btn" class="delete-btn">Delete</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        <div class="data-notice">
+          <p class="notice-text"><strong>Data sent:</strong> The chat's text messages, sender names, and dates sent and your calendar information (event names, dates, descriptions, etc). To preview conversation data before sending, open Debug Tools and click "Get Conversation JSON".</p>
+        </div>
+        
+        <div class="setting-row">
+          <label>Google Calendar</label>
+          <span id="calendar-status" class="calendar-status">Not connected</span>
+          <button id="connect-calendar-btn">Connect</button>
+        </div>
+        
+        <!-- Ambient Profile Section -->
+        <div class="setting-group ambient-profile-group">
+          <label class="setting-group-label">Ambient Profile</label>
+          <div class="profile-status" id="profile-status">
+            <span class="profile-status-indicator" id="profile-status-indicator"></span>
+            <span class="profile-status-text" id="profile-status-text">Not connected</span>
+            <button id="check-profile-btn" class="check-profile-btn">Check Connection</button>
+          </div>
+          <div class="profile-info" id="profile-info-unconnected">
+            <p class="info-text">Create an ambient profile to increase your daily limit to 10, to set up automatic updates, and unlock additional assistant functionality.</p>
+            <a href="https://tryambientai.com" target="_blank" class="info-link">Create profile at tryambientai.com</a>
+          </div>
+        </div>
+      </section>
+
+      <footer class="app-footer">
+        <span>Provided by <a href="https://tryambientai.com" target="_blank">Ambient</a></span>
+        <span class="footer-divider">·</span>
+        <a href="https://tryambientai.com/privacy/" target="_blank">Privacy Policy</a>
+        <span class="footer-divider">·</span>
+        <a href="mailto:contact@tryambientai.com">Contact</a>
+      </footer>
+    </div>
+
+    <!-- Main View - shown when setup is complete -->
+    <div id="main-view" class="view">
+      <header>
+        <div class="header-title">
+          <img src="../icons/ambient_256.png" alt="Ambient" class="header-icon">
+          <h1>Ambient Calendar</h1>
+        </div>
+        <p id="status" class="status status-idle">Ready</p>
+        <div id="error-banner" class="error-banner">
+          <span id="error-message"></span>
+          <button id="dismiss-error-btn" class="dismiss-error-btn" title="Dismiss">×</button>
+        </div>
+        <button id="settings-btn" class="settings-btn" title="Settings">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+        </button>
+      </header>
+
+      <section class="how-to-use">
+        <details>
+          <summary><h2>How to Use</h2></summary>
+          <div class="how-to-use-content">
+            <ol class="how-to-use-steps">
+              <li>Navigate to <a href="https://messages.google.com" target="_blank">messages.google.com</a></li>
+              <li>Open a conversation with event information you'd like added to your calendar</li>
+              <li>Press Extract Events and Ambient will get the messages, extract events, match it against your calendar, and provide you a button to add new events to your calendar</li>
+            </ol>
+          </div>
+        </details>
+      </section>
+
+      <section class="actions">
+        <div class="scroll-back-row">
+          <label for="scroll-back-days">Scroll back</label>
+          <input type="number" id="scroll-back-days" min="0" max="365" value="0" class="scroll-back-input">
+          <span class="scroll-back-label">days</span>
+        </div>
+        <button id="extract-btn" class="primary-btn">Extract Events</button>
+      </section>
+
+      <section class="conversation-info" id="conversation-section" style="display: none;">
+        <h2>Current Conversation</h2>
+        <div id="conversation-info">
+          <p class="conv-title" id="conv-title"></p>
+          <p class="conv-stats" id="conv-stats"></p>
+        </div>
+      </section>
+
+      <section class="results">
+        <h2>Detected Events</h2>
+        <div id="results">
+          <p class="placeholder">Open a conversation and click "Extract Events" to find calendar events.</p>
+        </div>
+      </section>
+
+      <section class="matched-events" id="matched-section" style="display: none;">
+        <h2>Calendar Matches</h2>
+        <div id="matched-results">
+          <p class="placeholder">Matching against your calendar...</p>
+        </div>
+      </section>
+
+      <section class="debug-section">
+        <details>
+          <summary><h2>Debug Tools</h2></summary>
+          <div class="debug-content">
+            <div class="debug-buttons">
+              <button id="debug-dom-info" class="debug-btn">Inspect DOM</button>
+              <button id="debug-get-conv" class="debug-btn">Get Conversation JSON</button>
+              <button id="debug-conv-prompt" class="debug-btn" disabled>Create Conversation Prompt</button>
+              <button id="debug-calendar-input" class="debug-btn">Create Calendar Input</button>
+            </div>
+            
+            <div class="debug-match-prompt-section">
+              <div class="debug-event-selector">
+                <label for="debug-event-select">Event:</label>
+                <select id="debug-event-select" disabled>
+                  <option value="">No events loaded</option>
+                </select>
+              </div>
+              <button id="debug-match-prompt" class="debug-btn" disabled>Create Match Prompt</button>
+            </div>
+            
+            <div class="debug-events-input" id="debug-events-section" style="display: none;">
+              <label for="debug-events-json">Paste Extracted Events JSON (for testing match prompt):</label>
+              <textarea id="debug-events-json" rows="4" placeholder='[{"event_type": "full_potential_event_details", "summary": "..."}]'></textarea>
+              <button id="debug-load-events" class="debug-btn">Load Events</button>
+            </div>
+            
+            <div class="debug-output">
+              <pre id="debug-output">Click a button above to see output...</pre>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section class="log-section">
+        <details>
+          <summary><h2>Activity Log</h2></summary>
+          <div id="log" class="log"></div>
+        </details>
+      </section>
+
+      <footer class="app-footer">
+        <span>Provided by <a href="https://tryambientai.com" target="_blank">Ambient</a></span>
+        <span class="footer-divider">·</span>
+        <a href="https://tryambientai.com/privacy/" target="_blank">Privacy Policy</a>
+        <span class="footer-divider">·</span>
+        <a href="mailto:contact@tryambientai.com">Contact</a>
+      </footer>
+    </div>
+
+    <!-- Settings Modal - shown when clicking settings button in main view -->
+    <div id="settings-modal" class="modal-overlay">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2>Settings</h2>
+          <button id="close-settings-btn" class="modal-close-btn">&times;</button>
+        </div>
+        
+        <section class="settings modal-settings">
+          <div class="setting-row">
+            <label for="modal-user-name">Your Name</label>
+            <input type="text" id="modal-user-name" placeholder="e.g., Bobby">
+            <button id="modal-save-name-btn" class="save-btn">Save</button>
+          </div>
+          <p class="setting-hint">Your name as it appears to others in messages (used for AI context)</p>
+          
+          <!-- AI Provider Selection (Modal) -->
+          <div class="setting-group ai-provider-group">
+            <label class="setting-group-label">AI Provider</label>
+            
+            <div class="provider-option">
+              <label class="radio-label">
+                <input type="radio" name="modal-ai-provider" id="modal-provider-ambient" value="ambient_ai">
+                <span class="radio-text">Use AmbientAI</span>
+              </label>
+              <div class="provider-info" id="modal-ambient-info">
+                <p class="info-text">Data is sent to AmbientAI who does not store the data and then passes it to Gemini with a paid tier. Google logs prompts and responses for a limited period of time, solely for the purpose of detecting violations of the Prohibited Use Policy.</p>
+                <a href="https://tryambientai.com/privacy/" target="_blank" class="info-link">View Ambient's Privacy Policy</a>
+                <a href="https://ai.google.dev/gemini-api/terms#paid-services" target="_blank" class="info-link">View Google's Paid Services Terms</a>
+              </div>
+            </div>
+            
+            <div class="provider-option">
+              <label class="radio-label">
+                <input type="radio" name="modal-ai-provider" id="modal-provider-gemini" value="gemini_key" checked>
+                <span class="radio-text">Use my Gemini API key</span>
+              </label>
+              <div class="provider-info" id="modal-gemini-info">
+                <p class="info-text">Free tier API keys allow Google to train on any data passed to it. Google's instructions are "Do not submit sensitive, confidential, or personal information to the Unpaid Services".</p>
+                <a href="https://ai.google.dev/gemini-api/terms" target="_blank" class="info-link">View Google's API Terms</a>
+                <a href="https://aistudio.google.com/apikey" target="_blank" class="info-link">Get a Gemini API key</a>
+              </div>
+              <!-- API Key input (only shown when "Use my Gemini API key" is selected) -->
+              <div id="modal-gemini-key-section" class="gemini-key-section">
+                <div class="setting-row" id="modal-api-key-input-row">
+                  <label for="modal-api-key">API Key</label>
+                  <input type="password" id="modal-api-key" placeholder="AIza...">
+                  <button id="modal-save-key-btn" class="save-btn">Save</button>
+                </div>
+                <p class="setting-error" id="modal-api-key-error"></p>
+                <div class="setting-row" id="modal-api-key-display-row" style="display: none;">
+                  <label>API Key</label>
+                  <span class="api-key-masked">**********</span>
+                  <button id="modal-delete-key-btn" class="delete-btn">Delete</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <div class="data-notice">
+            <p class="notice-text"><strong>Data sent:</strong> The chat's text messages, sender names, and dates sent and your calendar information (event names, dates, descriptions, etc). To preview conversation data before sending, open Debug Tools and click "Get Conversation JSON"./p>
+          </div>
+          
+          <div class="setting-row">
+            <label>Google Calendar</label>
+            <span id="modal-calendar-status" class="calendar-status">Not connected</span>
+            <button id="modal-connect-calendar-btn">Connect</button>
+          </div>
+          
+          <!-- Ambient Profile Section (Modal) -->
+          <div class="setting-group ambient-profile-group">
+            <label class="setting-group-label">Ambient Profile</label>
+            <div class="profile-status" id="modal-profile-status">
+              <span class="profile-status-indicator" id="modal-profile-status-indicator"></span>
+              <span class="profile-status-text" id="modal-profile-status-text">Not connected</span>
+              <button id="modal-check-profile-btn" class="check-profile-btn">Check Connection</button>
+            </div>
+            <div class="profile-info" id="modal-profile-info-unconnected">
+              <p class="info-text">Create an ambient profile to increase your daily limit to 10, to set up automatic updates, and unlock additional assistant functionality.</p>
+              <a href="https://tryambientai.com" target="_blank" class="info-link">Create profile at tryambientai.com</a>
+            </div>
+          </div>
+          
+          <!-- Debug Mode Toggle -->
+          <div class="setting-group debug-toggle-group">
+            <div class="setting-row toggle-row">
+              <label for="modal-debug-toggle">Debug Mode</label>
+              <label class="toggle-switch">
+                <input type="checkbox" id="modal-debug-toggle">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <p class="setting-hint toggle-hint">Show Debug Tools and Activity Log sections</p>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>

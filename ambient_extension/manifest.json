@@ -1,0 +1,54 @@
+{
+  "manifest_version": 3,
+  "name": "Ambient - Messages to Calendar",
+  "version": "0.1.0",
+  "description": "Extract calendar events from Google Messages conversations using AI and sync them to Google Calendar",
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' https://tryambientai.com https://*.googleapis.com https://accounts.google.com"
+  },
+  "permissions": [
+    "storage",
+    "identity",
+    "sidePanel",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://messages.google.com/*",
+    "https://tryambientai.com/*"
+  ],
+  "oauth2": {
+    "client_id": "636710672879-jtimq18mggv3ev79itq5uq0f1tpdmf5d.apps.googleusercontent.com",
+    "scopes": [
+      "openid",
+      "email",
+      "https://www.googleapis.com/auth/calendar.events",
+      "https://www.googleapis.com/auth/calendar.readonly"
+    ]
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://messages.google.com/*"],
+      "js": ["content.js"]
+    }
+  ],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "icons": {
+    "16": "icons/ambient_256.png",
+    "32": "icons/ambient_256.png",
+    "48": "icons/ambient_256.png",
+    "128": "icons/ambient_256.png"
+  },
+  "action": {
+    "default_title": "Ambient Calendar",
+    "default_icon": {
+      "16": "icons/ambient_256.png",
+      "32": "icons/ambient_256.png"
+    }
+  }
+}
