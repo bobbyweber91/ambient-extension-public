@@ -36,9 +36,13 @@ ALLOWED_ORIGINS = [
     'https://web.whatsapp.com',
 ]
 
-# Google OAuth client ID for the Ambient extension
+# Google OAuth client IDs for the Ambient extension
 # This is used to verify that tokens were issued for our extension
-GOOGLE_CLIENT_ID = '636710672879-jtimq18mggv3ev79itq5uq0f1tpdmf5d.apps.googleusercontent.com'
+# We accept both old and new client IDs during transition
+GOOGLE_CLIENT_IDS = [
+    '636710672879-biss5lra11l6ho1624m4b9kujmo2u3vb.apps.googleusercontent.com',  # New public extension
+    '636710672879-jtimq18mggv3ev79itq5uq0f1tpdmf5d.apps.googleusercontent.com',  # Legacy extension
+]
 
 # Rate limiting configuration
 RATE_LIMIT_REQUESTS_DEFAULT = 5   # Max requests per window for users without Ambient profile
@@ -86,7 +90,7 @@ def verify_google_token(token: str) -> dict | None:
         
         tokeninfo = tokeninfo_response.json()
         
-        if tokeninfo.get('aud') != GOOGLE_CLIENT_ID:
+        if tokeninfo.get('aud') not in GOOGLE_CLIENT_IDS:
             return None
         
         return userinfo
