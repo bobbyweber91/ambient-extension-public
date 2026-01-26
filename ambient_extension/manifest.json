@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Ambient - Messages to Calendar",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Extract calendar events from Google Messages conversations using AI and sync them to Google Calendar",
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' https://tryambientai.com https://*.googleapis.com https://accounts.google.com"
@@ -21,8 +21,7 @@
     "scopes": [
       "openid",
       "email",
-      "https://www.googleapis.com/auth/calendar.events",
-      "https://www.googleapis.com/auth/calendar.readonly"
+      "https://www.googleapis.com/auth/calendar"
     ]
   },
   "background": {
