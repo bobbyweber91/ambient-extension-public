@@ -185,5 +185,5 @@ MIT License — see [LICENSE](ambient_extension/LICENSE) for details.
 ## Links
 
 - [Ambient Website](https://tryambientai.com)
-- [Chrome Web Store](#) (coming soon)
+- [Chrome Web Store](https://chromewebstore.google.com/detail/ambient-messages-to-calen/fedgpihjlpnogfhomofkdiamhlklndmk)
 - [Report an Issue](https://github.com/bobbyweber91/ambient-extension-public/issues)
