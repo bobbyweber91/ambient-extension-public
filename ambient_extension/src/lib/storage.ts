@@ -131,8 +131,11 @@ export async function validateGeminiKey(key?: string): Promise<{ valid: boolean;
     // Make a minimal API call to verify the key works
     // Using the models.list endpoint as it's lightweight
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1/models?key=${apiKey}`,
-      { method: 'GET' }
+      'https://generativelanguage.googleapis.com/v1/models',
+      { 
+        method: 'GET',
+        headers: { 'x-goog-api-key': apiKey }
+      }
     );
     
     if (response.ok) {
