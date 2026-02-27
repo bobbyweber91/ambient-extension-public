@@ -1,2 +1,5 @@
 # Internal sync instructions (not for public)
 SYNC.md
+
+# Release zips (distributed via GitHub Releases, not committed)
+*.zip

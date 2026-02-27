@@ -2232,3 +2232,218 @@ button:disabled {
         max-width: 100%;
     }
 }
+
+/* =========================================
+   MODE SELECTION VIEW
+   ========================================= */
+.mode-select-header {
+    text-align: center;
+    padding: 24px 16px 20px;
+}
+
+.mode-select-header h1 {
+    font-size: 1.6rem;
+    font-weight: 600;
+    color: var(--ambient-text-dark);
+    letter-spacing: -0.02em;
+    margin-bottom: 8px;
+}
+
+.mode-select-subtitle {
+    font-size: 0.95rem;
+    color: var(--ambient-text-muted);
+}
+
+#mode-select-view {
+    position: relative;
+}
+
+#mode-select-view .settings-btn {
+    position: absolute;
+    top: 20px;
+    right: 0;
+}
+
+.mode-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 8px 0 20px;
+}
+
+.mode-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 24px 20px;
+    background: var(--ambient-surface-elevated);
+    border: 1px solid var(--ambient-border);
+    border-radius: var(--ambient-radius-md);
+    box-shadow: var(--ambient-shadow-sm);
+    cursor: pointer;
+    transition: var(--ambient-transition);
+    text-align: center;
+    font-family: inherit;
+    color: inherit;
+    width: 100%;
+}
+
+.mode-card:hover {
+    border-color: var(--ambient-primary);
+    box-shadow: var(--ambient-shadow-md);
+    transform: translateY(-2px);
+}
+
+.mode-card:active {
+    transform: translateY(0);
+}
+
+.mode-card-icon {
+    width: 56px;
+    height: 56px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, var(--ambient-accent-purple), var(--ambient-accent-coral));
+    border-radius: 50%;
+    color: var(--ambient-primary);
+}
+
+.mode-card-title {
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: var(--ambient-text-dark);
+}
+
+.mode-card-desc {
+    font-size: 0.85rem;
+    color: var(--ambient-text-muted);
+    line-height: 1.4;
+}
+
+/* =========================================
+   BACK BUTTON
+   ========================================= */
+.back-btn {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    background: none;
+    border: 1px solid var(--ambient-border);
+    border-radius: var(--ambient-radius-sm);
+    cursor: pointer;
+    color: var(--ambient-text-muted);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: var(--ambient-transition-fast);
+    flex-shrink: 0;
+}
+
+.back-btn:hover {
+    background: var(--ambient-surface-muted);
+    color: var(--ambient-primary);
+    border-color: var(--ambient-primary);
+}
+
+/* =========================================
+   FILE IMPORT VIEW
+   ========================================= */
+.import-upload-section {
+    padding: 8px 0 16px;
+}
+
+.file-dropzone {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 32px 20px;
+    border: 2px dashed var(--ambient-border);
+    border-radius: var(--ambient-radius-md);
+    background: var(--ambient-surface-muted);
+    cursor: pointer;
+    transition: var(--ambient-transition);
+    text-align: center;
+    margin-bottom: 12px;
+}
+
+.file-dropzone:hover,
+.file-dropzone.dragover {
+    border-color: var(--ambient-primary);
+    background: rgba(120, 119, 198, 0.04);
+}
+
+.file-dropzone.dragover {
+    transform: scale(1.01);
+}
+
+.dropzone-icon {
+    color: var(--ambient-text-light);
+    margin-bottom: 4px;
+}
+
+.file-dropzone:hover .dropzone-icon,
+.file-dropzone.dragover .dropzone-icon {
+    color: var(--ambient-primary);
+}
+
+.dropzone-text {
+    font-size: 0.95rem;
+    font-weight: 500;
+    color: var(--ambient-text-dark);
+}
+
+.dropzone-hint {
+    font-size: 0.8rem;
+    color: var(--ambient-text-light);
+}
+
+.file-input-hidden {
+    display: none;
+}
+
+.file-selected {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    background: var(--ambient-surface-elevated);
+    border: 1px solid var(--ambient-border);
+    border-radius: var(--ambient-radius-sm);
+    margin-bottom: 12px;
+}
+
+.file-name {
+    flex: 1;
+    font-size: 0.9rem;
+    color: var(--ambient-text-dark);
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.file-remove-btn {
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    background: none;
+    border: none;
+    font-size: 1.2rem;
+    color: var(--ambient-text-light);
+    cursor: pointer;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: var(--ambient-transition-fast);
+    flex-shrink: 0;
+}
+
+.file-remove-btn:hover {
+    color: var(--status-error);
+    background: rgba(229, 62, 62, 0.08);
+}

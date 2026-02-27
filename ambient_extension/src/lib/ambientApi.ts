@@ -197,6 +197,51 @@ export async function matchEventViaAmbient(
 }
 
 /**
+ * Extract events from an uploaded file via AmbientAI
+ */
+export async function extractEventsFromFileViaAmbient(
+  fileBase64: string,
+  mimeType: string,
+  fileName: string
+): Promise<ExtractEventsResult> {
+  const googleToken = await getCalendarToken();
+
+  const response = await fetch(`${AMBIENT_API_BASE}/extract_from_file/`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${googleToken}`,
+    },
+    body: JSON.stringify({
+      file_data: fileBase64,
+      mime_type: mimeType,
+      file_name: fileName,
+    }),
+  });
+
+  const isAmbientUserHeader = response.headers.get('X-Ambient-User');
+  const isAmbientUserFromHeader = isAmbientUserHeader === 'true';
+
+  if (!response.ok) {
+    const errorMessage = await parseErrorResponse(response);
+    throw new Error(`Validation error: ${errorMessage}`);
+  }
+
+  const data: ExtractEventsResponse = await response.json();
+
+  if (!data.success) {
+    throw new Error(data.error || 'Unknown error from AmbientAI');
+  }
+
+  const isAmbientUser = data.is_ambient_user ?? isAmbientUserFromHeader;
+
+  return {
+    events: data.events || [],
+    isAmbientUser,
+  };
+}
+
+/**
  * Check if the AmbientAI API is available and configured
  * 
  * @returns Health check status

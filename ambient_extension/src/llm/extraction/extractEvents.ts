@@ -90,3 +90,62 @@ export function filterActionableEvents(events: ExtractedEvent[]): ExtractedEvent
     event.event_type !== 'not_an_event'
   );
 }
+
+const FILE_EXTRACTION_PROMPT = `Extract all calendar events from this document. Return a JSON array where each event has this exact structure:
+
+{
+  "event_type": "full_potential_event_details",
+  "summary": "<event title>",
+  "description": "<any remaining description, color codes, notes, category info, etc.>",
+  "location": "<location if mentioned, otherwise null>",
+  "start": { "date": "YYYY-MM-DD" },
+  "end": { "date": "YYYY-MM-DD" }
+}
+
+Rules:
+- For all-day events, use "date" in "YYYY-MM-DD" format for start and end.
+- For timed events, use "dateTime" in ISO 8601 format (e.g. "2026-03-15T09:00:00") and include "timeZone" (e.g. "America/New_York") instead of "date".
+- If the end date/time is not specified, set end equal to start.
+- Set event_type to "full_potential_event_details" for all events.
+- If a legend or guide is provided (e.g. blue = all day event, yellow = makeup day, red = no school), use it to enhance the description field of each relevant event.
+- Include every event you can find in the document, even if some details are incomplete.
+- Return ONLY the JSON array, no other text.`;
+
+/**
+ * Extract events from an uploaded file using Gemini multimodal API
+ */
+export async function extractEventsFromFile(
+  fileBase64: string,
+  mimeType: string,
+  apiKey: string
+): Promise<ExtractedEvent[]> {
+  console.log('Starting file event extraction, mimeType:', mimeType);
+
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const model = genAI.getGenerativeModel({
+    model: 'gemini-2.0-flash-exp',
+    generationConfig: {
+      responseMimeType: 'application/json',
+    },
+  });
+
+  console.log('Calling Gemini API with file...');
+  const result = await model.generateContent({
+    contents: [{
+      role: 'user',
+      parts: [
+        { inlineData: { mimeType, data: fileBase64 } },
+        { text: FILE_EXTRACTION_PROMPT },
+      ],
+    }],
+  });
+
+  const response = result.response;
+  const responseText = response.text();
+  console.log('Received file extraction response, length:', responseText.length);
+
+  const events = parseExtractedEvents(responseText);
+  console.log('Parsed', events.length, 'events from file');
+
+  return events;
+}

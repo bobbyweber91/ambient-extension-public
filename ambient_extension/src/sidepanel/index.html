@@ -119,10 +119,64 @@
       </footer>
     </div>
 
-    <!-- Main View - shown when setup is complete -->
+    <!-- Mode Selection View - shown after setup is complete -->
+    <div id="mode-select-view" class="view">
+      <div class="mode-select-header">
+        <img src="../icons/ambient_256.png" alt="Ambient" class="get-started-icon">
+        <h1>Ambient Calendar</h1>
+        <p class="mode-select-subtitle">How would you like to add events?</p>
+      </div>
+
+      <div class="mode-cards">
+        <button class="mode-card" id="mode-messages-btn">
+          <div class="mode-card-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+            </svg>
+          </div>
+          <span class="mode-card-title">Get events from messages</span>
+          <span class="mode-card-desc">Extract calendar events from a Google Messages conversation</span>
+        </button>
+
+        <button class="mode-card" id="mode-import-btn">
+          <div class="mode-card-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+              <polyline points="14 2 14 8 20 8"></polyline>
+              <line x1="12" y1="18" x2="12" y2="12"></line>
+              <line x1="9" y1="15" x2="15" y2="15"></line>
+            </svg>
+          </div>
+          <span class="mode-card-title">Import calendar from file</span>
+          <span class="mode-card-desc">Upload a PDF, document, or image to extract calendar events</span>
+        </button>
+      </div>
+
+      <button id="mode-settings-btn" class="settings-btn" title="Settings">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+      </button>
+
+      <footer class="app-footer">
+        <span>Provided by <a href="https://tryambientai.com" target="_blank">Ambient</a></span>
+        <span class="footer-divider">·</span>
+        <a href="https://tryambientai.com/privacy/" target="_blank">Privacy Policy</a>
+        <span class="footer-divider">·</span>
+        <a href="mailto:contact@tryambientai.com">Contact</a>
+      </footer>
+    </div>
+
+    <!-- Main View - shown when "Get events from messages" is selected -->
     <div id="main-view" class="view">
       <header>
         <div class="header-title">
+          <button id="main-back-btn" class="back-btn" title="Back">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="15 18 9 12 15 6"></polyline>
+            </svg>
+          </button>
           <img src="../icons/ambient_256.png" alt="Ambient" class="header-icon">
           <h1>Ambient Calendar</h1>
         </div>
@@ -221,6 +275,79 @@
         <details>
           <summary><h2>Activity Log</h2></summary>
           <div id="log" class="log"></div>
+        </details>
+      </section>
+
+      <footer class="app-footer">
+        <span>Provided by <a href="https://tryambientai.com" target="_blank">Ambient</a></span>
+        <span class="footer-divider">·</span>
+        <a href="https://tryambientai.com/privacy/" target="_blank">Privacy Policy</a>
+        <span class="footer-divider">·</span>
+        <a href="mailto:contact@tryambientai.com">Contact</a>
+      </footer>
+    </div>
+
+    <!-- Import View - shown when "Import calendar from file" is selected -->
+    <div id="import-view" class="view">
+      <header>
+        <div class="header-title">
+          <button id="import-back-btn" class="back-btn" title="Back">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="15 18 9 12 15 6"></polyline>
+            </svg>
+          </button>
+          <img src="../icons/ambient_256.png" alt="Ambient" class="header-icon">
+          <h1>Import Calendar</h1>
+        </div>
+        <p id="import-status" class="status status-idle">Ready</p>
+        <div id="import-error-banner" class="error-banner">
+          <span id="import-error-message"></span>
+          <button id="import-dismiss-error-btn" class="dismiss-error-btn" title="Dismiss">&times;</button>
+        </div>
+        <button id="import-settings-btn" class="settings-btn" title="Settings">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+        </button>
+      </header>
+
+      <section class="import-upload-section">
+        <div class="file-dropzone" id="file-dropzone">
+          <svg class="dropzone-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="17 8 12 3 7 8"></polyline>
+            <line x1="12" y1="3" x2="12" y2="15"></line>
+          </svg>
+          <p class="dropzone-text">Drag & drop a file here, or click to browse</p>
+          <p class="dropzone-hint">Supports PDF, images, documents, and more</p>
+          <input type="file" id="file-input" class="file-input-hidden" accept="*/*">
+        </div>
+        <div class="file-selected" id="file-selected" style="display: none;">
+          <span class="file-name" id="file-name"></span>
+          <button class="file-remove-btn" id="file-remove-btn" title="Remove file">&times;</button>
+        </div>
+        <button id="import-extract-btn" class="primary-btn" disabled>Extract Events from File</button>
+      </section>
+
+      <section class="results" id="import-results-section">
+        <h2>Detected Events</h2>
+        <div id="import-results">
+          <p class="placeholder">Upload a file and click "Extract Events from File" to find calendar events.</p>
+        </div>
+      </section>
+
+      <section class="matched-events" id="import-matched-section" style="display: none;">
+        <h2>Calendar Matches</h2>
+        <div id="import-matched-results">
+          <p class="placeholder">Matching against your calendar...</p>
+        </div>
+      </section>
+
+      <section class="log-section">
+        <details>
+          <summary><h2>Activity Log</h2></summary>
+          <div id="import-log" class="log"></div>
         </details>
       </section>
 

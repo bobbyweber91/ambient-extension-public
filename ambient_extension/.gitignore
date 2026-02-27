@@ -28,5 +28,8 @@ npm-debug.log*
 # Chrome extension unpacked key (if generated)
 *.pem
 
+# Release zips (distributed via GitHub Releases, not committed)
+*.zip
+
 # OAuth client secrets (users must create their own)
 client_secret*.json

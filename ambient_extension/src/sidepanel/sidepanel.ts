@@ -129,6 +129,35 @@ let modalDebugToggle: HTMLInputElement | null;
 // Scroll Back Days UI Element
 let scrollBackDaysInput: HTMLInputElement | null;
 
+// Mode Selection View Elements
+let modeSelectView: HTMLElement | null;
+let modeMessagesBtn: HTMLElement | null;
+let modeImportBtn: HTMLElement | null;
+let modeSettingsBtn: HTMLElement | null;
+
+// Import View Elements
+let importView: HTMLElement | null;
+let importBackBtn: HTMLElement | null;
+let importSettingsBtn: HTMLElement | null;
+let importExtractBtn: HTMLButtonElement | null;
+let importStatusEl: HTMLElement | null;
+let importResultsEl: HTMLElement | null;
+let importMatchedSection: HTMLElement | null;
+let importMatchedResultsEl: HTMLElement | null;
+let importLogEl: HTMLElement | null;
+let importErrorBanner: HTMLElement | null;
+let importErrorMessage: HTMLElement | null;
+let importDismissErrorBtn: HTMLElement | null;
+let fileDropzone: HTMLElement | null;
+let fileInput: HTMLInputElement | null;
+let fileSelected: HTMLElement | null;
+let fileNameEl: HTMLElement | null;
+let fileRemoveBtn: HTMLElement | null;
+let mainBackBtn: HTMLElement | null;
+
+// Import State
+let selectedFile: File | null = null;
+
 // State
 let currentStatus: ExtensionStatus = 'idle';
 let lastParsedConversation: ConversationDict | null = null;
@@ -245,6 +274,32 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Scroll back days input
   scrollBackDaysInput = document.getElementById('scroll-back-days') as HTMLInputElement;
 
+  // Mode Selection View elements
+  modeSelectView = document.getElementById('mode-select-view');
+  modeMessagesBtn = document.getElementById('mode-messages-btn');
+  modeImportBtn = document.getElementById('mode-import-btn');
+  modeSettingsBtn = document.getElementById('mode-settings-btn');
+
+  // Import View elements
+  importView = document.getElementById('import-view');
+  importBackBtn = document.getElementById('import-back-btn');
+  importSettingsBtn = document.getElementById('import-settings-btn');
+  importExtractBtn = document.getElementById('import-extract-btn') as HTMLButtonElement;
+  importStatusEl = document.getElementById('import-status');
+  importResultsEl = document.getElementById('import-results');
+  importMatchedSection = document.getElementById('import-matched-section');
+  importMatchedResultsEl = document.getElementById('import-matched-results');
+  importLogEl = document.getElementById('import-log');
+  importErrorBanner = document.getElementById('import-error-banner');
+  importErrorMessage = document.getElementById('import-error-message');
+  importDismissErrorBtn = document.getElementById('import-dismiss-error-btn');
+  fileDropzone = document.getElementById('file-dropzone');
+  fileInput = document.getElementById('file-input') as HTMLInputElement;
+  fileSelected = document.getElementById('file-selected');
+  fileNameEl = document.getElementById('file-name');
+  fileRemoveBtn = document.getElementById('file-remove-btn');
+  mainBackBtn = document.getElementById('main-back-btn');
+
   // Set up event listeners - Get Started view
   extractBtn?.addEventListener('click', handleExtractClick);
   saveKeyBtn?.addEventListener('click', handleSaveApiKey);
@@ -285,6 +340,24 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Debug toggle event listener
   modalDebugToggle?.addEventListener('change', handleDebugToggleChange);
+
+  // Mode selection listeners
+  modeMessagesBtn?.addEventListener('click', () => showView('main'));
+  modeImportBtn?.addEventListener('click', () => showView('import'));
+  modeSettingsBtn?.addEventListener('click', showSettingsModal);
+  mainBackBtn?.addEventListener('click', () => showView('mode-select'));
+
+  // Import view listeners
+  importBackBtn?.addEventListener('click', () => showView('mode-select'));
+  importSettingsBtn?.addEventListener('click', showSettingsModal);
+  importExtractBtn?.addEventListener('click', handleImportExtractClick);
+  importDismissErrorBtn?.addEventListener('click', hideImportErrorBanner);
+  fileDropzone?.addEventListener('click', () => fileInput?.click());
+  fileDropzone?.addEventListener('dragover', handleDragOver);
+  fileDropzone?.addEventListener('dragleave', handleDragLeave);
+  fileDropzone?.addEventListener('drop', handleFileDrop);
+  fileInput?.addEventListener('change', handleFileSelect);
+  fileRemoveBtn?.addEventListener('click', handleFileRemove);
 
   // Load saved settings and determine which view to show
   await loadSettings();
@@ -354,7 +427,7 @@ async function loadSettings() {
 
     // Determine which view to show
     const setupComplete = checkSetupComplete(!!userName, aiConfigured, calendarStatus.connected);
-    showView(setupComplete ? 'main' : 'get-started');
+    showView(setupComplete ? 'mode-select' : 'get-started');
 
     log('Settings loaded');
   } catch (error) {
@@ -372,15 +445,23 @@ function checkSetupComplete(hasName: boolean, aiConfigured: boolean, hasCalendar
 /**
  * Show the specified view
  */
-function showView(viewName: 'get-started' | 'main') {
-  if (getStartedView && mainView) {
-    if (viewName === 'get-started') {
-      getStartedView.classList.add('active');
-      mainView.classList.remove('active');
-    } else {
-      getStartedView.classList.remove('active');
-      mainView.classList.add('active');
-    }
+function showView(viewName: 'get-started' | 'mode-select' | 'main' | 'import') {
+  const allViews = [getStartedView, modeSelectView, mainView, importView];
+  allViews.forEach(v => v?.classList.remove('active'));
+
+  switch (viewName) {
+    case 'get-started':
+      getStartedView?.classList.add('active');
+      break;
+    case 'mode-select':
+      modeSelectView?.classList.add('active');
+      break;
+    case 'main':
+      mainView?.classList.add('active');
+      break;
+    case 'import':
+      importView?.classList.add('active');
+      break;
   }
 }
 
@@ -412,7 +493,7 @@ async function checkAndTransitionToMainView() {
   updateSetupProgress(!!userName, aiConfigured, calendarStatus.connected);
 
   if (checkSetupComplete(!!userName, aiConfigured, calendarStatus.connected)) {
-    showView('main');
+    showView('mode-select');
   }
 }
 
@@ -3493,4 +3574,290 @@ async function handleDebugMatchPrompt() {
     setDebugOutput(`Error: ${(error as Error).message}`, true);
     log(`[Debug] Error: ${(error as Error).message}`);
   }
+}
+
+// =========================================
+//  FILE IMPORT FLOW
+// =========================================
+
+function importLog(message: string) {
+  if (importLogEl) {
+    const entry = document.createElement('div');
+    entry.className = 'log-entry';
+    const now = new Date().toLocaleTimeString();
+    entry.textContent = `[${now}] ${message}`;
+    importLogEl.appendChild(entry);
+    importLogEl.scrollTop = importLogEl.scrollHeight;
+  }
+  console.log(`[Import] ${message}`);
+}
+
+function updateImportStatus(status: ExtensionStatus) {
+  if (!importStatusEl) return;
+  importStatusEl.className = `status status-${status}`;
+  const labels: Record<string, string> = {
+    idle: 'Ready',
+    extracting: 'Extracting...',
+    fetching_calendar: 'Fetching calendar...',
+    matching: 'Matching...',
+    complete: 'Complete',
+    error: 'Error',
+  };
+  importStatusEl.textContent = labels[status] || status;
+}
+
+function showImportErrorBanner(message: string) {
+  if (importErrorBanner && importErrorMessage) {
+    importErrorMessage.textContent = message;
+    importErrorBanner.classList.add('visible');
+  }
+}
+
+function hideImportErrorBanner() {
+  if (importErrorBanner) {
+    importErrorBanner.classList.remove('visible');
+  }
+}
+
+function handleDragOver(e: DragEvent) {
+  e.preventDefault();
+  e.stopPropagation();
+  fileDropzone?.classList.add('dragover');
+}
+
+function handleDragLeave(e: DragEvent) {
+  e.preventDefault();
+  e.stopPropagation();
+  fileDropzone?.classList.remove('dragover');
+}
+
+function handleFileDrop(e: DragEvent) {
+  e.preventDefault();
+  e.stopPropagation();
+  fileDropzone?.classList.remove('dragover');
+  const files = e.dataTransfer?.files;
+  if (files && files.length > 0) {
+    setSelectedFile(files[0]);
+  }
+}
+
+function handleFileSelect() {
+  const files = fileInput?.files;
+  if (files && files.length > 0) {
+    setSelectedFile(files[0]);
+  }
+}
+
+function setSelectedFile(file: File) {
+  selectedFile = file;
+  if (fileDropzone) fileDropzone.style.display = 'none';
+  if (fileSelected) fileSelected.style.display = 'flex';
+  if (fileNameEl) fileNameEl.textContent = file.name;
+  if (importExtractBtn) importExtractBtn.disabled = false;
+}
+
+function handleFileRemove() {
+  selectedFile = null;
+  if (fileDropzone) fileDropzone.style.display = 'flex';
+  if (fileSelected) fileSelected.style.display = 'none';
+  if (fileInput) fileInput.value = '';
+  if (importExtractBtn) importExtractBtn.disabled = true;
+}
+
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      // Strip the data URL prefix (e.g. "data:application/pdf;base64,")
+      const base64 = result.split(',')[1];
+      resolve(base64);
+    };
+    reader.onerror = () => reject(new Error('Failed to read file'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function handleImportExtractClick() {
+  if (!selectedFile) return;
+
+  const aiProvider = await getAIProvider();
+
+  try {
+    if (aiProvider === 'ambient_ai' && await isDailyExtractLimitReached()) {
+      showImportErrorBanner('Daily extraction limit reached. Please try again tomorrow or switch to your own Gemini API key.');
+      return;
+    }
+
+    hideImportErrorBanner();
+
+    // Reset import results
+    if (importResultsEl) {
+      importResultsEl.innerHTML = '<p class="placeholder"><span class="btn-spinner"></span> Extracting events from file...</p>';
+    }
+    if (importMatchedSection) importMatchedSection.style.display = 'none';
+
+    if (importExtractBtn) importExtractBtn.disabled = true;
+    updateImportStatus('extracting');
+    importLog(`Reading file: ${selectedFile.name} (${(selectedFile.size / 1024).toFixed(1)} KB)`);
+
+    const fileBase64 = await readFileAsBase64(selectedFile);
+    const mimeType = selectedFile.type || 'application/octet-stream';
+
+    const [apiKey] = await Promise.all([getGeminiKey()]);
+
+    if (aiProvider === 'gemini_key' && !apiKey) {
+      throw new Error('Please configure your Gemini API key in settings');
+    }
+
+    const providerName = aiProvider === 'ambient_ai' ? 'AmbientAI' : 'Gemini';
+    importLog(`Extracting events with ${providerName}... (this may take 10-30 seconds)`);
+
+    const extractResult = await chrome.runtime.sendMessage({
+      type: 'EXTRACT_FROM_FILE',
+      fileBase64,
+      mimeType,
+      fileName: selectedFile.name,
+      apiKey: apiKey || '',
+      provider: aiProvider,
+    });
+
+    if (!extractResult.success) {
+      if (aiProvider === 'ambient_ai' && extractResult.error?.includes('Rate limit exceeded')) {
+        const currentCount = await getDailyExtractCount();
+        const limit = await getDailyExtractLimit();
+        if (currentCount < limit) {
+          await setDailyExtractCount(limit);
+        }
+        showImportErrorBanner('Daily extraction limit reached.');
+        updateImportStatus('error');
+        return;
+      }
+      throw new Error(extractResult.error);
+    }
+
+    if (aiProvider === 'ambient_ai' && extractResult.isAmbientUser !== undefined) {
+      await saveIsAmbientUser(extractResult.isAmbientUser);
+    }
+
+    if (aiProvider === 'ambient_ai') {
+      await incrementDailyExtractCount();
+    }
+
+    const events: ExtractedEvent[] = extractResult.events;
+    lastExtractedEvents = events;
+    importLog(`AI found ${events.length} event(s) in file`);
+
+    displayImportedEvents(events);
+
+    const calendarConnected = await isCalendarConnected();
+    if (!calendarConnected) {
+      importLog('Calendar not connected - skipping calendar matching');
+      updateImportStatus('complete');
+      return;
+    }
+
+    await handleImportCalendarMatching(events, apiKey);
+
+  } catch (error) {
+    updateImportStatus('error');
+    const errorMsg = (error as Error).message;
+    showImportErrorBanner(`Extraction failed: ${errorMsg}`);
+    importLog(`Error: ${errorMsg}`);
+    if (importResultsEl) {
+      importResultsEl.innerHTML = '<p class="placeholder">Extraction failed. Check the error above for details.</p>';
+    }
+  } finally {
+    if (importExtractBtn && selectedFile) importExtractBtn.disabled = false;
+  }
+}
+
+function displayImportedEvents(events: ExtractedEvent[]) {
+  if (!importResultsEl) return;
+
+  const actionableEvents = events.filter(e => e.event_type !== 'not_an_event');
+
+  if (actionableEvents.length === 0) {
+    importResultsEl.innerHTML = '<p class="placeholder">No events found in the uploaded file.</p>';
+    return;
+  }
+
+  importResultsEl.innerHTML = `
+    <div class="events-list">
+      <p class="events-header">Found ${actionableEvents.length} event(s) in file:</p>
+      ${actionableEvents.map(event => renderEventCard(event, false)).join('')}
+    </div>
+  `;
+}
+
+async function handleImportCalendarMatching(events: ExtractedEvent[], apiKey: string | null) {
+  try {
+    const processableEvents = events.filter(
+      e => e.event_type === 'full_potential_event_details' ||
+           e.event_type === 'incomplete_event_details'
+    );
+
+    if (processableEvents.length === 0) {
+      importLog('No processable events to match');
+      updateImportStatus('complete');
+      return;
+    }
+
+    if (importMatchedSection) importMatchedSection.style.display = 'block';
+    if (importMatchedResultsEl) {
+      importMatchedResultsEl.innerHTML = '<p class="placeholder"><span class="btn-spinner"></span> Matching against your calendar...</p>';
+    }
+
+    updateImportStatus('fetching_calendar');
+    importLog('Fetching calendar events for matching...');
+
+    const dateRange = getDateRangeFromEvents(processableEvents);
+    const calendarEvents = await getEventsFromAllCalendars(dateRange.timeMin, dateRange.timeMax);
+    importLog(`Fetched ${calendarEvents.length} calendar events for comparison`);
+
+    updateImportStatus('matching');
+    const aiProvider = await getAIProvider();
+    const providerName = aiProvider === 'ambient_ai' ? 'AmbientAI' : 'Gemini';
+    importLog(`Matching events with ${providerName}...`);
+
+    const matchResult = await chrome.runtime.sendMessage({
+      type: 'MATCH_EVENTS',
+      extractedEvents: processableEvents,
+      calendarEvents,
+      apiKey: apiKey || '',
+      provider: aiProvider,
+    });
+
+    if (!matchResult.success) {
+      throw new Error(matchResult.error);
+    }
+
+    const matches: MatchResult[] = matchResult.matches;
+    lastMatchResults = matches;
+
+    importLog(`Matching complete: ${matches.length} result(s)`);
+    displayImportMatchResults(matches);
+    updateImportStatus('complete');
+    importLog('Import complete!');
+
+  } catch (error) {
+    updateImportStatus('error');
+    const errorMsg = (error as Error).message;
+    showImportErrorBanner(`Matching failed: ${errorMsg}`);
+    importLog(`Matching error: ${errorMsg}`);
+  }
+}
+
+function displayImportMatchResults(matches: MatchResult[]) {
+  // Reuse the same rendering as the main view but target the import containers
+  const origMatchedResults = matchedResultsEl;
+  const origMatchedSection = matchedSection;
+
+  matchedResultsEl = importMatchedResultsEl;
+  matchedSection = importMatchedSection;
+
+  displayMatchResults(matches);
+
+  matchedResultsEl = origMatchedResults;
+  matchedSection = origMatchedSection;
 }

@@ -7,9 +7,9 @@
  * - 'ambient_ai': AmbientAI's paid tier via Django server
  */
 
-import { extractEvents } from '../llm/extraction';
+import { extractEvents, extractEventsFromFile } from '../llm/extraction';
 import { matchAllEventsToCalendar } from '../llm/matching';
-import { extractEventsViaAmbient, matchEventViaAmbient, checkAmbientProfile } from '../lib/ambientApi';
+import { extractEventsViaAmbient, extractEventsFromFileViaAmbient, matchEventViaAmbient, checkAmbientProfile } from '../lib/ambientApi';
 import { getAIProvider, type AIProvider } from '../lib/storage';
 import type { ConversationDict, ExtractedEvent, CalendarEvent, MatchResult, MatchUpdate } from '../types';
 
@@ -31,6 +31,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ success: false, error: error.message });
         });
       return true; // Keep channel open for async response
+
+    case 'EXTRACT_FROM_FILE':
+      handleExtractFromFile(message)
+        .then((result) => sendResponse({ success: true, events: result.events, isAmbientUser: result.isAmbientUser }))
+        .catch((error) => {
+          console.error('Extract from file error:', error);
+          sendResponse({ success: false, error: error.message });
+        });
+      return true;
 
     case 'MATCH_EVENTS':
       handleMatchEvents(message)
@@ -102,9 +111,48 @@ interface UpdateCalendarEventMessage {
   updates: Partial<CalendarEvent>;
 }
 
+interface ExtractFromFileMessage {
+  type: 'EXTRACT_FROM_FILE';
+  fileBase64: string;
+  mimeType: string;
+  fileName: string;
+  apiKey: string;
+  provider?: AIProvider;
+}
+
 interface ExtractEventsResult {
   events: ExtractedEvent[];
   isAmbientUser?: boolean;
+}
+
+async function handleExtractFromFile(message: ExtractFromFileMessage): Promise<ExtractEventsResult> {
+  console.log('Extract from file called:', message.fileName);
+
+  if (!message.fileBase64) {
+    throw new Error('No file data provided');
+  }
+
+  const provider = message.provider || await getAIProvider();
+  console.log(`[Ambient] Using AI provider for file extraction: ${provider}`);
+
+  if (provider === 'ambient_ai') {
+    const result = await extractEventsFromFileViaAmbient(
+      message.fileBase64,
+      message.mimeType,
+      message.fileName
+    );
+    return { events: result.events, isAmbientUser: result.isAmbientUser };
+  } else {
+    if (!message.apiKey) {
+      throw new Error('No API key provided for Gemini key provider');
+    }
+    const events = await extractEventsFromFile(
+      message.fileBase64,
+      message.mimeType,
+      message.apiKey
+    );
+    return { events };
+  }
 }
 
 async function handleExtractEvents(message: ExtractEventsMessage): Promise<ExtractEventsResult> {

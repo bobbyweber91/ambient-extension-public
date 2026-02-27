@@ -246,3 +246,48 @@ def validate_extract_request(data: dict) -> Tuple[bool, Optional[str]]:
         return False, f"Invalid conversation: {error}"
     
     return True, None
+
+
+MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024  # 20 MB
+
+def validate_file_extract_request(data: dict) -> Tuple[bool, Optional[str]]:
+    """
+    Validate a file extraction request.
+    
+    Expected format:
+    {
+        "file_data": str,    # Base64-encoded file content
+        "mime_type": str,    # MIME type of the file
+        "file_name": str     # Original file name (optional, for logging)
+    }
+    
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    if not isinstance(data, dict):
+        return False, "Request must be a JSON object"
+
+    if 'file_data' not in data:
+        return False, "Missing required field: file_data"
+
+    if not isinstance(data.get('file_data'), str):
+        return False, "Field 'file_data' must be a base64-encoded string"
+
+    if not data.get('file_data').strip():
+        return False, "Field 'file_data' cannot be empty"
+
+    # Rough size check on the base64 string (base64 is ~4/3 of original)
+    estimated_size = len(data['file_data']) * 3 // 4
+    if estimated_size > MAX_FILE_SIZE_BYTES:
+        return False, f"File too large. Maximum size is {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB"
+
+    if 'mime_type' not in data:
+        return False, "Missing required field: mime_type"
+
+    if not isinstance(data.get('mime_type'), str):
+        return False, "Field 'mime_type' must be a string"
+
+    if not data.get('mime_type').strip():
+        return False, "Field 'mime_type' cannot be empty"
+
+    return True, None

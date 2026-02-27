@@ -1,6 +1,6 @@
 {
   "name": "ambient_extension",
-  "version": "1.0.1",
+  "version": "1.0.3",
   "description": "Chrome extension that extracts calendar events from Google Messages conversations using AI",
   "private": true,
   "license": "GPL-3.0",

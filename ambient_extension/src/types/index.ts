@@ -183,3 +183,12 @@ export interface ScrollBackDaysResponse {
   reachedTarget?: boolean;
   oldestMessageDate?: string;
 }
+
+export interface ExtractFromFileMessage {
+  type: 'EXTRACT_FROM_FILE';
+  fileBase64: string;
+  mimeType: string;
+  fileName: string;
+  apiKey: string;
+  provider?: 'gemini_key' | 'ambient_ai';
+}

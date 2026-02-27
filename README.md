@@ -2,23 +2,58 @@
 
 **Turn your chaotic group chat into Google Calendar events in 30 seconds.**
 
-The Ambient Extension extracts plans, dates, and events from your group messages and adds them directly to your calendar
+The Ambient Extension extracts plans, dates, and events from your group messages and adds them directly to your calendar.
 
-## Purpose
+No account required. No message storage.
 
-This is the open-source repository for the Ambient Chrome Extension and its backend API. We've made this public to:
+---
 
-1. **Provide transparency** — See how we process your data without any longterm storage.
-2. **Enable community contributions** — Found a bug? Want to support a new messaging platform? PRs welcome
+## Install
 
-### How It Works
+### Option 1: Chrome Web Store (Stable)
+
+[**Add to Chrome**](https://chromewebstore.google.com/detail/ambient-messages-to-calen/fedgpihjlpnogfhomofkdiamhlklndmk) — one-click install from the Chrome Web Store.
+
+### Option 2: Download Latest from GitHub
+
+For the most recent version (may be ahead of the Web Store):
+
+1. Download `ambient_extension_v*.zip` from the [**latest release**](https://github.com/bobbyweber91/ambient-extension-public/releases/latest)
+2. Unzip the file
+3. Open `chrome://extensions/` in Chrome
+4. Enable **Developer mode** (top right toggle)
+5. Click **Load unpacked** (top left)
+6. Select the unzipped folder
+
+To update: download the new release zip, replace your existing files, and click the refresh icon on the extension card in `chrome://extensions/`.
+
+### Option 3: Build from Source
+
+```bash
+cd ambient_extension
+npm install
+npm run build
+```
+
+Then load the `ambient_extension/dist` folder as an unpacked extension (same steps 3–6 above).
+
+---
+
+## How It Works
 
 1. Open your group chat on [messages.google.com](https://messages.google.com)
 2. Click the Ambient extension icon
 3. Hit "Extract Events" — AI identifies all the plans in your conversation
 4. Review and add events to your Google Calendar
 
-No account required. No message storage.
+---
+
+## Purpose
+
+This is the open-source repository for the Ambient Chrome Extension and its backend API. We've made this public to:
+
+1. **Provide transparency** — See how we process your data without any long-term storage.
+2. **Enable community contributions** — Found a bug? Want to support a new messaging platform? PRs welcome.
 
 ---
 
@@ -136,33 +171,20 @@ A Django app that proxies AI requests through Ambient's Gemini API. This exists 
 
 ---
 
-## Running Locally
+## Development
 
-### Extension Development
+### Extension
 
 ```bash
 cd ambient_extension
 npm install
 npm run build     # Production build
-npm run watch     # Development with hot reload
+npm run dev       # Watch mode with hot reload
 ```
 
-Load the extension in Chrome:
-1. Go to `chrome://extensions/`
-2. Enable "Developer mode"
-3. Click "Load unpacked"
-4. Select the `ambient_extension/dist` folder
+### Backend
 
-### Backend Development
-
-The `extension_endpoint` Django app requires:
-- Python 3.10+
-- Django 4.2+
-- A `DEFAULT_API_KEY` setting with a valid Gemini API key
-
-To use your own API key instead of Ambient's proxy:
-1. Get a Gemini API key from [Google AI Studio](https://aistudio.google.com/)
-2. Update the extension to call Gemini directly (modify `src/sidepanel/sidepanel.ts`)
+The `extension_endpoint` Django app requires Python 3.10+, Django 4.2+, and a `DEFAULT_API_KEY` setting with a valid Gemini API key.
 
 ---
 

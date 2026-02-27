@@ -4,6 +4,7 @@ Provides event extraction and calendar matching via AmbientAI's paid Gemini tier
 """
 import json
 import time
+import base64
 from functools import wraps
 import requests
 from django.http import JsonResponse, HttpResponse
@@ -12,8 +13,9 @@ from django.views.decorators.csrf import csrf_exempt
 from django.conf import settings
 from django.core.cache import cache
 from google import genai
+from google.genai import types
 
-from .validators import validate_extract_request, validate_match_request
+from .validators import validate_extract_request, validate_match_request, validate_file_extract_request
 from autoscheduler.core.text_extraction.text_extraction_examples import (
     format_conversation_for_event_extraction,
     get_text_event_extraction_instructions
@@ -569,6 +571,166 @@ def find_matches(request):
         return JsonResponse({
             "success": False,
             "match_result": None,
+            "error": f"Internal error: {str(e)}"
+        }, status=500)
+
+
+FILE_EXTRACTION_PROMPT = """Extract all calendar events from this document. Return a JSON array where each event has this exact structure:
+
+{
+  "event_type": "full_potential_event_details",
+  "summary": "<event title>",
+  "description": "<any remaining description, color codes, notes, category info, etc.>",
+  "location": "<location if mentioned, otherwise null>",
+  "start": { "date": "YYYY-MM-DD" },
+  "end": { "date": "YYYY-MM-DD" }
+}
+
+Rules:
+- For all-day events, use "date" in "YYYY-MM-DD" format for start and end.
+- For timed events, use "dateTime" in ISO 8601 format (e.g. "2026-03-15T09:00:00") and include "timeZone" (e.g. "America/New_York") instead of "date".
+- If the end date/time is not specified, set end equal to start.
+- Set event_type to "full_potential_event_details" for all events.
+- If a legend or guide is provided (e.g. blue = all day event, yellow = makeup day, red = no school), use it to enhance the description field of each relevant event.
+- Include every event you can find in the document, even if some details are incomplete.
+- Return ONLY the JSON array, no other text."""
+
+
+def call_gemini_multimodal_with_retry(client, model_name: str, contents: list, config: dict, max_retries: int = 3):
+    """
+    Call Gemini API with multimodal contents and retry logic.
+    """
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=config
+            )
+            
+            if response.text:
+                if "Error processing request: 500 INTERNAL." in response.text:
+                    time.sleep(attempt + 1)
+                    continue
+                if "503 UNAVAILABLE." in response.text:
+                    time.sleep(attempt + 1)
+                    continue
+            
+            return response.text
+            
+        except Exception as e:
+            error_msg = str(e)
+            if any(code in error_msg for code in ["500", "503", "UNAVAILABLE", "INTERNAL"]):
+                time.sleep(attempt + 1)
+                if attempt == max_retries - 1:
+                    raise Exception(f"Gemini API error after {max_retries} attempts: {error_msg}")
+            else:
+                raise
+    
+    raise Exception("Gemini API error: max retries exceeded")
+
+
+@csrf_exempt
+@cors_exempt
+@require_google_auth
+@require_http_methods(["POST", "OPTIONS"])
+def extract_from_file(request):
+    """
+    Extract events from an uploaded file using Gemini AI multimodal.
+    
+    POST /extension_endpoint/extract_from_file/
+    
+    Headers:
+        Authorization: Bearer <google_oauth_token>
+    
+    Request body:
+    {
+        "file_data": str (base64),
+        "mime_type": str,
+        "file_name": str (optional)
+    }
+    
+    Response:
+    {
+        "success": bool,
+        "events": [...] or null,
+        "error": str or null
+    }
+    """
+    try:
+        try:
+            data = json.loads(request.body)
+        except json.JSONDecodeError as e:
+            return JsonResponse({
+                "success": False,
+                "events": None,
+                "error": f"Invalid JSON: {str(e)}"
+            }, status=400)
+        
+        is_valid, error = validate_file_extract_request(data)
+        if not is_valid:
+            return JsonResponse({
+                "success": False,
+                "events": None,
+                "error": error
+            }, status=400)
+        
+        file_data = data['file_data']
+        mime_type = data['mime_type'].strip()
+        
+        try:
+            file_bytes = base64.b64decode(file_data)
+        except Exception as e:
+            return JsonResponse({
+                "success": False,
+                "events": None,
+                "error": f"Invalid base64 data: {str(e)}"
+            }, status=400)
+        
+        api_key = get_api_key()
+        client = genai.Client(api_key=api_key)
+        
+        config = {
+            "response_mime_type": "application/json",
+        }
+        
+        contents = [
+            types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
+            FILE_EXTRACTION_PROMPT,
+        ]
+        
+        response_text = call_gemini_multimodal_with_retry(client, DEFAULT_MODEL, contents, config)
+        
+        try:
+            parsed_events = sanitize_and_parse_json(response_text, can_log=False)
+        except Exception as e:
+            return JsonResponse({
+                "success": False,
+                "events": None,
+                "error": f"Failed to parse AI response: {str(e)}"
+            }, status=500)
+        
+        if isinstance(parsed_events, dict):
+            parsed_events = [parsed_events]
+        
+        return JsonResponse({
+            "success": True,
+            "events": parsed_events,
+            "error": None,
+            "is_ambient_user": request.is_ambient_user
+        })
+        
+    except ValueError as e:
+        return JsonResponse({
+            "success": False,
+            "events": None,
+            "error": str(e)
+        }, status=500)
+        
+    except Exception as e:
+        return JsonResponse({
+            "success": False,
+            "events": None,
             "error": f"Internal error: {str(e)}"
         }, status=500)
 
