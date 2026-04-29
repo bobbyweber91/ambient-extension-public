@@ -10,6 +10,7 @@ module.exports = (env, argv) => {
       background: './src/background/background.ts',
       content: './src/content/content.ts',
       sidepanel: './src/sidepanel/sidepanel.ts',
+      calendarAgentContent: './src/calendar_agent/contentScript.ts',
     },
     output: {
       path: path.resolve(__dirname, 'dist'),

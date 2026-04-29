@@ -1,0 +1,1 @@
+export { FacebookMessengerPlatform } from './parser';

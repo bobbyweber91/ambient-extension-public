@@ -1,0 +1,1 @@
+export { GoogleMessagesPlatform } from './parser';

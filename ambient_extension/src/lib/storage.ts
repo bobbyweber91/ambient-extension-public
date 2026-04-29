@@ -32,10 +32,12 @@ const STORAGE_KEYS = {
   SETTINGS_VERSION: 'settingsVersion',
   AI_PROVIDER: 'aiProvider',
   SCROLL_BACK_DAYS: 'scrollBackDays',
+  ADDITIONAL_CONVERSATIONS: 'additionalConversations',
   DEBUG_MODE: 'debugMode',
   DAILY_EXTRACT_COUNT: 'dailyExtractCount',
   DAILY_EXTRACT_DATE: 'dailyExtractDate',
   IS_AMBIENT_USER: 'isAmbientUser',
+  SELECTED_CALENDAR_ID: 'selectedCalendarId',
 } as const;
 
 // Rate limiting constants
@@ -271,6 +273,22 @@ export async function getScrollBackDays(): Promise<number> {
 }
 
 /**
+ * Save the additional conversations setting
+ */
+export async function saveAdditionalConversations(count: number): Promise<void> {
+  const valid = Math.max(0, Math.floor(count));
+  await chrome.storage.local.set({ [STORAGE_KEYS.ADDITIONAL_CONVERSATIONS]: valid });
+}
+
+/**
+ * Get the additional conversations setting. Defaults to 0.
+ */
+export async function getAdditionalConversations(): Promise<number> {
+  const result = await chrome.storage.local.get(STORAGE_KEYS.ADDITIONAL_CONVERSATIONS);
+  return result[STORAGE_KEYS.ADDITIONAL_CONVERSATIONS] ?? 0;
+}
+
+/**
  * Save debug mode setting
  * 
  * @param enabled - Whether debug mode is enabled
@@ -389,4 +407,85 @@ export async function getIsAmbientUser(): Promise<boolean> {
 export async function getDailyExtractLimit(): Promise<number> {
   const isAmbientUser = await getIsAmbientUser();
   return isAmbientUser ? DAILY_EXTRACT_LIMIT_AMBIENT : DAILY_EXTRACT_LIMIT_DEFAULT;
+}
+
+/**
+ * Save the user's selected calendar ID for event import.
+ */
+export async function saveSelectedCalendarId(calendarId: string): Promise<void> {
+  await chrome.storage.local.set({ [STORAGE_KEYS.SELECTED_CALENDAR_ID]: calendarId });
+}
+
+/**
+ * Get the persisted calendar ID selection.
+ */
+export async function getSelectedCalendarId(): Promise<string | null> {
+  const result = await chrome.storage.local.get(STORAGE_KEYS.SELECTED_CALENDAR_ID);
+  return result[STORAGE_KEYS.SELECTED_CALENDAR_ID] || null;
+}
+
+
+// ---------------------------------------------------------------------------
+// Created trips (per-extension-user trip page index)
+// ---------------------------------------------------------------------------
+//
+// Stored under chrome.storage.local.createdTrips. Each entry is a record of a trip the
+// extension created (or last touched). The list is capped to 50 most-recent so it doesn't
+// grow without bound. Used by:
+//   - Re-import detection: when the user runs Extract on a conversation, look up an entry
+//     by conversation title to decide if this should be a Create vs. Update flow.
+//   - "My Trips" sidepanel section: surfaces the URLs so the user can return to old trips
+//     even before they sign up for an Ambient account.
+
+export interface CreatedTripEntry {
+  shareUrl: string;
+  shareToken: string;
+  summary: string;            // Trip name (from the parent trip event's summary)
+  conversationTitle?: string; // Title of the conversation this trip was scraped from
+  createdAt: string;          // ISO timestamp of original creation
+  lastUpdatedAt?: string;     // ISO timestamp of most recent re-import update
+  googleCalendarId?: string;  // Per-trip Google Calendar id (used for direct gcal lookups)
+}
+
+const CREATED_TRIPS_KEY = 'createdTrips';
+const CREATED_TRIPS_LIMIT = 50;
+
+export async function getCreatedTrips(): Promise<CreatedTripEntry[]> {
+  const stored = await chrome.storage.local.get(CREATED_TRIPS_KEY);
+  return Array.isArray(stored[CREATED_TRIPS_KEY]) ? stored[CREATED_TRIPS_KEY] : [];
+}
+
+/** Add or update an entry. Matches by shareToken. New entries go to the front of the list. */
+export async function upsertCreatedTrip(entry: CreatedTripEntry): Promise<void> {
+  const list = await getCreatedTrips();
+  const filtered = list.filter(t => t.shareToken !== entry.shareToken);
+  filtered.unshift(entry);
+  await chrome.storage.local.set({ [CREATED_TRIPS_KEY]: filtered.slice(0, CREATED_TRIPS_LIMIT) });
+}
+
+export async function removeCreatedTrip(shareToken: string): Promise<void> {
+  const list = await getCreatedTrips();
+  const filtered = list.filter(t => t.shareToken !== shareToken);
+  await chrome.storage.local.set({ [CREATED_TRIPS_KEY]: filtered });
+}
+
+/**
+ * Find a stored trip whose conversation title matches the given title (case-insensitive,
+ * trimmed). Returns the most recently created/updated match, or null if none.
+ *
+ * Used by the re-import detection path: when the user runs Extract on a conversation, we
+ * scan storage for an existing trip from the same conversation. Title-based matching is a
+ * good-enough heuristic for MVP — exact match is required so we don't false-positive on
+ * similar conversation names. Future hardening: also match by participant overlap.
+ */
+export async function findCreatedTripByConversationTitle(
+  title: string,
+): Promise<CreatedTripEntry | null> {
+  const target = (title || '').trim().toLowerCase();
+  if (!target) return null;
+  const list = await getCreatedTrips();
+  const matches = list.filter(t => (t.conversationTitle || '').trim().toLowerCase() === target);
+  if (matches.length === 0) return null;
+  // List is stored newest-first via upsertCreatedTrip, so just take the first match.
+  return matches[0];
 }

@@ -12,4 +12,7 @@ urlpatterns = [
     path('find_matches/', views.find_matches, name='find_matches'),
     path('health/', views.health_check, name='health_check'),
     path('check_profile/', views.check_profile, name='check_profile'),
+    path('calendar_agent/', views.calendar_agent, name='calendar_agent'),
+    path('submit_page_url/', views.submit_page_url, name='submit_page_url'),
+    path('create_trip/', views.create_trip, name='create_trip'),
 ]

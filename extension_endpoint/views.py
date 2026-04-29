@@ -24,19 +24,14 @@ from autoscheduler.core.matches.v2_event_match_instructions_and_examples import 
     generate_event_match_instructions
 )
 from json_utils import sanitize_and_parse_json
+from genai_utils import response_text
 
 # Model to use for API calls
-DEFAULT_MODEL = "gemini-2.0-flash"
+DEFAULT_MODEL = "gemini-2.5-flash"
 
-# Allowed origins for CORS
-# NOTE: If the Chrome extension ID changes (e.g., when publishing to Chrome Web Store),
-# update the extension ID here and in any other locations that reference it.
-ALLOWED_ORIGINS = [
-    'chrome-extension://lmmjfddkgnehcnhelddgmlmookgemeop',  # Ambient Chrome extension
-    'https://messages.google.com',
-    'https://www.messenger.com',
-    'https://web.whatsapp.com',
-]
+# CORS origin allowlist + helpers live in extension.cors_helpers so the trips app can reuse
+# them (the trip edit endpoints are also called from the extension during re-import).
+from extension.cors_helpers import ALLOWED_ORIGINS, cors_exempt as _shared_cors_exempt
 
 # Google OAuth client IDs for the Ambient extension
 # This is used to verify that tokens were issued for our extension
@@ -226,6 +221,7 @@ def require_google_auth(view_func):
         
         # Attach user info to request for use in view
         request.google_user_id = user_id
+        request.google_user_email = user_email
         request.is_ambient_user = is_ambient_user
         
         # Call the actual view
@@ -241,42 +237,9 @@ def require_google_auth(view_func):
     return wrapper
 
 
-def get_cors_origin(request):
-    """
-    Get the appropriate CORS origin for the request.
-    Only allows the specific Ambient extension and messaging sites.
-    """
-    origin = request.headers.get('Origin', '')
-    
-    # Allow only specific origins
-    if origin in ALLOWED_ORIGINS:
-        return origin
-    
-    # No match - return None (no CORS header will be set)
-    return None
-
-
-def add_cors_headers(response, origin):
-    """Add CORS headers to a response for the given origin."""
-    if origin:
-        response['Access-Control-Allow-Origin'] = origin
-        response['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-        response['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-        response['Access-Control-Expose-Headers'] = 'X-RateLimit-Remaining, X-RateLimit-Reset, X-RateLimit-Limit, X-Ambient-User'
-    return response
-
-
-def cors_exempt(view_func):
-    """Decorator to add CORS headers and handle OPTIONS preflight requests."""
-    @wraps(view_func)
-    def wrapper(request, *args, **kwargs):
-        origin = get_cors_origin(request)
-        if request.method == 'OPTIONS':
-            response = HttpResponse()
-            return add_cors_headers(response, origin)
-        response = view_func(request, *args, **kwargs)
-        return add_cors_headers(response, origin)
-    return wrapper
+# cors_exempt + helpers come from extension.cors_helpers (imported above as _shared_cors_exempt).
+# Re-export under the local name so existing @cors_exempt usages below stay unchanged.
+cors_exempt = _shared_cors_exempt
 
 
 def get_api_key():
@@ -313,15 +276,15 @@ def call_gemini_with_retry(client, model_name: str, prompt: str, config: dict, m
             )
             
             # Check for error strings in response text
-            if response.text:
-                if "Error processing request: 500 INTERNAL." in response.text:
+            if response_text(response):
+                if "Error processing request: 500 INTERNAL." in response_text(response):
                     time.sleep(attempt + 1)
                     continue
-                if "503 UNAVAILABLE." in response.text:
+                if "503 UNAVAILABLE." in response_text(response):
                     time.sleep(attempt + 1)
                     continue
             
-            return response.text
+            return response_text(response)
             
         except Exception as e:
             error_msg = str(e)
@@ -608,15 +571,15 @@ def call_gemini_multimodal_with_retry(client, model_name: str, contents: list, c
                 config=config
             )
             
-            if response.text:
-                if "Error processing request: 500 INTERNAL." in response.text:
+            if response_text(response):
+                if "Error processing request: 500 INTERNAL." in response_text(response):
                     time.sleep(attempt + 1)
                     continue
-                if "503 UNAVAILABLE." in response.text:
+                if "503 UNAVAILABLE." in response_text(response):
                     time.sleep(attempt + 1)
                     continue
             
-            return response.text
+            return response_text(response)
             
         except Exception as e:
             error_msg = str(e)
@@ -834,4 +797,377 @@ def check_profile(request):
         'is_ambient_user': is_ambient_user,
         'email': masked_email,
         'error': None,
+    })
+
+
+# ============ Calendar Agent Endpoint ============
+
+# Higher rate limits for calendar agent (a single session uses 10-20 calls)
+CA_RATE_LIMIT_REQUESTS_DEFAULT = 20
+CA_RATE_LIMIT_REQUESTS_AMBIENT = 50
+CA_RATE_LIMIT_WINDOW = 86400  # 24 hours
+
+
+def check_calendar_agent_rate_limit(user_id: str, is_ambient_user: bool = False) -> tuple[bool, int, int]:
+    """Rate limiter specifically for calendar agent sessions."""
+    cache_key = f"ratelimit:calendar_agent:{user_id}"
+    limit = CA_RATE_LIMIT_REQUESTS_AMBIENT if is_ambient_user else CA_RATE_LIMIT_REQUESTS_DEFAULT
+    current_count = cache.get(cache_key, 0)
+    remaining = limit - current_count
+
+    if current_count >= limit:
+        return False, 0, limit
+
+    new_count = current_count + 1
+    cache.set(cache_key, new_count, timeout=CA_RATE_LIMIT_WINDOW)
+    return True, remaining - 1, limit
+
+
+def require_google_auth_calendar_agent(view_func):
+    """
+    Auth decorator for calendar agent endpoint.
+    Uses separate, higher rate limits than the standard extraction endpoints.
+    """
+    @wraps(view_func)
+    def wrapper(request, *args, **kwargs):
+        if request.method == 'OPTIONS':
+            return view_func(request, *args, **kwargs)
+
+        auth_header = request.headers.get('Authorization', '')
+        if not auth_header.startswith('Bearer '):
+            return JsonResponse({
+                'success': False, 'error': 'Missing or invalid Authorization header',
+                'response': None,
+            }, status=401)
+
+        token = auth_header[7:]
+        if not token or len(token) < 20:
+            return JsonResponse({
+                'success': False, 'error': 'Invalid token format', 'response': None,
+            }, status=401)
+
+        userinfo = verify_google_token(token)
+        if not userinfo:
+            return JsonResponse({
+                'success': False,
+                'error': 'Invalid or expired Google token. Please reconnect your calendar.',
+                'response': None,
+            }, status=401)
+
+        user_id = userinfo['sub']
+        user_email = userinfo.get('email', '')
+        is_ambient_user = check_ambient_profile(user_email)
+
+        allowed, remaining, limit = check_calendar_agent_rate_limit(user_id, is_ambient_user)
+        if not allowed:
+            response = JsonResponse({
+                'success': False,
+                'error': 'Calendar agent rate limit exceeded. Please try again later.',
+                'response': None,
+                'is_ambient_user': is_ambient_user,
+            }, status=429)
+            response['X-RateLimit-Remaining'] = '0'
+            response['X-RateLimit-Limit'] = str(limit)
+            response['X-Ambient-User'] = 'true' if is_ambient_user else 'false'
+            return response
+
+        request.google_user_id = user_id
+        request.is_ambient_user = is_ambient_user
+
+        response = view_func(request, *args, **kwargs)
+        response['X-RateLimit-Remaining'] = str(remaining)
+        response['X-RateLimit-Limit'] = str(limit)
+        response['X-Ambient-User'] = 'true' if is_ambient_user else 'false'
+        return response
+
+    return wrapper
+
+
+@csrf_exempt
+@cors_exempt
+@require_google_auth_calendar_agent
+@require_http_methods(["POST", "OPTIONS"])
+def calendar_agent(request):
+    """
+    Calendar agent LLM endpoint. Handles Planner, Extractor, Interactor, and Categorizer roles.
+
+    POST /extension_endpoint/calendar_agent/
+
+    Headers:
+        Authorization: Bearer <google_oauth_token>
+
+    Request body:
+    {
+        "role": "planner" | "extractor" | "interactor" | "categorizer",
+        "system_prompt": str,
+        "user_message": str
+    }
+
+    Response:
+    {
+        "success": bool,
+        "response": str (raw LLM response text) or null,
+        "error": str or null
+    }
+    """
+    try:
+        try:
+            data = json.loads(request.body)
+        except json.JSONDecodeError as e:
+            return JsonResponse({
+                "success": False, "response": None,
+                "error": f"Invalid JSON: {str(e)}"
+            }, status=400)
+
+        role = data.get('role', '')
+        system_prompt = data.get('system_prompt', '')
+        user_message = data.get('user_message', '')
+
+        if role not in ('planner', 'extractor', 'interactor', 'categorizer'):
+            return JsonResponse({
+                "success": False, "response": None,
+                "error": f"Invalid role: {role}. Must be planner, extractor, interactor, or categorizer."
+            }, status=400)
+
+        if not system_prompt or not user_message:
+            return JsonResponse({
+                "success": False, "response": None,
+                "error": "system_prompt and user_message are required."
+            }, status=400)
+
+        api_key = get_api_key()
+        client = genai.Client(api_key=api_key)
+
+        config = {
+            "response_mime_type": "application/json",
+            "system_instruction": system_prompt,
+            "max_output_tokens": 65536,
+        }
+
+        response_text = call_gemini_with_retry(client, DEFAULT_MODEL, user_message, config)
+
+        return JsonResponse({
+            "success": True,
+            "response": response_text,
+            "error": None,
+            "is_ambient_user": request.is_ambient_user,
+        })
+
+    except ValueError as e:
+        return JsonResponse({
+            "success": False, "response": None, "error": str(e)
+        }, status=500)
+
+    except Exception as e:
+        return JsonResponse({
+            "success": False, "response": None,
+            "error": f"Internal error: {str(e)}"
+        }, status=500)
+
+
+@csrf_exempt
+@cors_exempt
+@require_google_auth_calendar_agent
+@require_http_methods(["POST", "OPTIONS"])
+def submit_page_url(request):
+    """
+    Accept a URL submission from the calendar agent when no known platform
+    is detected. Stored so Ambient can prioritize building new extractors.
+
+    POST /extension_endpoint/submit_page_url/
+
+    Headers:
+        Authorization: Bearer <google_oauth_token>
+
+    Request body:
+    {
+        "url": str,
+        "page_title": str (optional)
+    }
+
+    Response:
+    {
+        "success": bool,
+        "error": str or null
+    }
+    """
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError as e:
+        return JsonResponse({
+            "success": False,
+            "error": f"Invalid JSON: {str(e)}"
+        }, status=400)
+
+    url = data.get('url', '').strip()
+    if not url:
+        return JsonResponse({
+            "success": False,
+            "error": "Missing required field: url"
+        }, status=400)
+
+    if len(url) > 2048:
+        return JsonResponse({
+            "success": False,
+            "error": "URL exceeds maximum length of 2048 characters"
+        }, status=400)
+
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+        return JsonResponse({
+            "success": False,
+            "error": "Invalid URL: must be an http or https URL"
+        }, status=400)
+
+    domain = parsed.netloc.lower()
+    page_title = data.get('page_title', '')[:512]
+
+    try:
+        from .models import PageSubmission
+        PageSubmission.objects.create(
+            url=url,
+            domain=domain,
+            page_title=page_title,
+            google_user_id=request.google_user_id,
+        )
+    except Exception as e:
+        return JsonResponse({
+            "success": False,
+            "error": f"Failed to save submission: {str(e)}"
+        }, status=500)
+
+    return JsonResponse({
+        "success": True,
+        "error": None,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Trip creation (extension path)
+# ---------------------------------------------------------------------------
+
+@csrf_exempt
+@cors_exempt
+@require_google_auth
+@require_http_methods(["POST", "OPTIONS"])
+def create_trip(request):
+    """Persist a trip + its sibling events from the extension's already-extracted output.
+
+    The extension does the heavy lifting client-side: scrape conversation, run extraction
+    via /extract_event/, create a per-trip Google Calendar via the user's OAuth token, and
+    insert events. This endpoint just creates DB records (Trip + sibling CalendarUpdates)
+    and returns a share URL so the extension can store + display it.
+
+    Request body shape:
+      {
+        "trip_event": <ExtractedEvent>,           // the parent trip event (summary contains "trip")
+        "sibling_events": [<ExtractedEvent>, ...], // other events from the same scrape
+        "google_calendar_id": "<gcal id>",         // calendar already created client-side
+        "set_calendar_public_read": true           // whether the server should also set ACL
+      }
+
+    Auth: Google OAuth token (existing extension pattern). The token's `sub` and `email`
+    are stored on the Trip as `creator_google_sub` and `creator_email` so an Ambient signup
+    using the same Google account triggers auto-claim later.
+    """
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"success": False, "error": "Invalid JSON"}, status=400)
+
+    trip_event = data.get("trip_event") or {}
+    sibling_events = data.get("sibling_events") or []
+    google_calendar_id = data.get("google_calendar_id")
+
+    if not trip_event.get("summary"):
+        return JsonResponse({"success": False, "error": "trip_event.summary is required"}, status=400)
+    if 'trip' not in trip_event["summary"].lower():
+        return JsonResponse({"success": False, "error": "trip_event.summary must contain 'trip'"}, status=400)
+
+    # If the request comes from a signed-in Ambient user (same email), use them as the
+    # owner. Otherwise the trip is created anonymously and can be auto-claimed later.
+    from users.models import CustomUser
+    from trips.models import Trip
+    from autoscheduler.models import CalendarUpdate
+
+    creator_user = None
+    if request.google_user_email:
+        creator_user = CustomUser.objects.filter(email__iexact=request.google_user_email).first()
+
+    try:
+        trip = Trip.objects.create(
+            conversation=None,  # extension trips aren't bound to an Ambient Conversation record
+            summary=trip_event.get("summary"),
+            description=trip_event.get("description") or '',
+            location=trip_event.get("location") or None,
+            start=trip_event.get("start") or None,
+            end=trip_event.get("end") or None,
+            event_type=trip_event.get("event_type") or 'full_potential_event_details',
+            match_type='no_match',
+            accommodation_details=trip_event.get("trip_accommodation_details") or None,
+            google_calendar_id=google_calendar_id,
+            created_by=creator_user,
+            creator_google_sub=request.google_user_id,
+            creator_email=request.google_user_email,
+            status='active',
+        )
+        # The parent trip event's CalendarUpdate row IS the Trip (multi-table inheritance).
+        # Self-reference the FK so trip detail queries pick it up.
+        trip.trip = trip
+        trip.save(update_fields=['trip'])
+
+        if creator_user is not None:
+            trip.tracked_by.add(creator_user)
+    except Exception as e:
+        return JsonResponse({"success": False, "error": f"Failed to create trip: {e}"}, status=500)
+
+    # Sibling events. Each becomes a CalendarUpdate with FK to the Trip.
+    created_event_count = 0
+    for ev in sibling_events:
+        if not ev.get("summary"):
+            continue
+        try:
+            CalendarUpdate.objects.create(
+                conversation=None,
+                trip=trip,
+                summary=ev.get("summary"),
+                description=ev.get("description") or '',
+                location=ev.get("location") or None,
+                start=ev.get("start") or None,
+                end=ev.get("end") or None,
+                event_type=ev.get("event_type") or 'full_potential_event_details',
+                match_type='no_match',
+                flight_details=ev.get("flight_details") or None,
+            )
+            created_event_count += 1
+        except Exception as e:
+            print(f"create_trip: failed to create sibling CU for {ev.get('summary')}: {e}")
+            continue
+
+    # Best-effort public-read ACL. The extension may have already set it client-side; this
+    # is a backstop in case it didn't.
+    if data.get("set_calendar_public_read", False) and google_calendar_id and creator_user is not None:
+        try:
+            from gcal_functions import (
+                dict_to_credentials, refresh_credentials_if_needed, build_calendar_service,
+                set_calendar_public_read,
+            )
+            if creator_user.gcal_creds:
+                creds = refresh_credentials_if_needed(dict_to_credentials(creator_user.gcal_creds))
+                service = build_calendar_service(creds)
+                set_calendar_public_read(service, google_calendar_id)
+        except Exception as e:
+            print(f"create_trip: backstop ACL set failed: {e}")
+
+    share_url = request.build_absolute_uri(f"/trip/{trip.share_token}/")
+
+    return JsonResponse({
+        "success": True,
+        "trip_id": trip.pk,
+        "share_token": str(trip.share_token),
+        "share_url": share_url,
+        "events_created": created_event_count,
+        "is_ambient_user": request.is_ambient_user,
+        "error": None,
     })

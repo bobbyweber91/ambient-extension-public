@@ -43,6 +43,14 @@ export type EventType =
   | 'not_a_desired_event'
   | 'not_an_event';
 
+// Per-passenger flight info populated by the LLM on flight-type events. Mirrors the
+// Pydantic FlightDetails model on the server (autoscheduler/schemas.py).
+export interface FlightDetails {
+  passenger?: string;       // can contain multiple names separated by "and"/"&"/","
+  flight_number?: string;
+  destination?: string;     // where the flight is going (trip page infers arrival vs. departure)
+}
+
 // Extracted event from LLM
 export interface ExtractedEvent {
   event_type: EventType;
@@ -54,6 +62,11 @@ export interface ExtractedEvent {
   attendees?: string;
   htmlLink?: string;
   user_confirmed_attendance?: boolean;
+  // Trip-related fields. Only populated on the trip-type and flight-type events
+  // respectively; absent on regular events. The server ignores these for calendar
+  // matching — they exist solely to feed the trip page.
+  trip_accommodation_details?: string;
+  flight_details?: FlightDetails;
   reference_messages?: Array<{
     sender: string;
     text: string;
@@ -191,4 +204,30 @@ export interface ExtractFromFileMessage {
   fileName: string;
   apiKey: string;
   provider?: 'gemini_key' | 'ambient_ai';
+}
+
+export interface ConversationListItem {
+  index: number;
+  name: string;
+}
+
+export interface GetConversationListMessage {
+  type: 'GET_CONVERSATION_LIST';
+}
+
+export interface ClickConversationMessage {
+  type: 'CLICK_CONVERSATION';
+  index: number;
+}
+
+// Event categorization (LLM-powered filter grouping)
+export interface EventCategory {
+  id: string;
+  label: string;
+  color: string;
+  eventIndices: number[];
+}
+
+export interface CategorizeEventsResult {
+  categories: EventCategory[];
 }

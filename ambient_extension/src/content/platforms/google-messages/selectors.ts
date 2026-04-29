@@ -61,6 +61,14 @@ export const SELECTORS = {
     '.conversation-container',
     '[role="list"]',
   ],
+
+  /**
+   * Conversation list items in the sidebar.
+   * Each is an <a> with class "list-item" and data-e2e-conversation attribute.
+   */
+  CONVERSATION_LIST_ITEM: 'a.list-item[data-e2e-conversation]',
+  CONVERSATION_LIST_ITEM_NAME: '[data-e2e-conversation-name]',
+  CONVERSATION_LIST_ITEM_SELECTED: 'a.list-item.selected',
 } as const;
 
 /**

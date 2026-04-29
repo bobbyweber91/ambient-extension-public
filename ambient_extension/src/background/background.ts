@@ -9,9 +9,12 @@
 
 import { extractEvents, extractEventsFromFile } from '../llm/extraction';
 import { matchAllEventsToCalendar } from '../llm/matching';
+import { categorizeEvents } from '../llm/categorization';
 import { extractEventsViaAmbient, extractEventsFromFileViaAmbient, matchEventViaAmbient, checkAmbientProfile } from '../lib/ambientApi';
 import { getAIProvider, type AIProvider } from '../lib/storage';
-import type { ConversationDict, ExtractedEvent, CalendarEvent, MatchResult, MatchUpdate } from '../types';
+import type { ConversationDict, ExtractedEvent, CalendarEvent, MatchResult, MatchUpdate, EventCategory } from '../types';
+import { CalendarAgentSession, type ProgressCallback } from '../calendar_agent/orchestrator';
+import type { CalendarAgentProgress } from '../calendar_agent/types';
 
 // Enable side panel on extension icon click
 chrome.sidePanel
@@ -73,6 +76,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         .then((result) => sendResponse({ success: true, isAmbientUser: result.isAmbientUser, email: result.email }))
         .catch((error) => {
           console.error('Check profile error:', error);
+          sendResponse({ success: false, error: error.message });
+        });
+      return true;
+
+    case 'START_CALENDAR_AGENT':
+      handleStartCalendarAgent(message)
+        .then((result) => sendResponse({ success: true, events: result }))
+        .catch((error) => {
+          console.error('Calendar agent error:', error);
+          sendResponse({ success: false, error: error.message });
+        });
+      return true;
+
+    case 'STOP_CALENDAR_AGENT':
+      handleStopCalendarAgent();
+      sendResponse({ success: true });
+      return true;
+
+    case 'GET_CALENDAR_AGENT_STATUS':
+      sendResponse({
+        success: true,
+        running: activeCalendarAgentSession !== null,
+        progress: lastCalendarAgentProgress,
+      });
+      return true;
+
+    case 'CATEGORIZE_EVENTS':
+      handleCategorizeEvents(message)
+        .then((categories) => sendResponse({ success: true, categories }))
+        .catch((error) => {
+          console.error('Categorize events error:', error);
           sendResponse({ success: false, error: error.message });
         });
       return true;
@@ -316,6 +350,84 @@ async function handleCheckProfile(): Promise<CheckProfileResult> {
   console.log(`[Ambient] Profile check: email=${result.email}, isAmbientUser=${result.isAmbientUser}`);
   
   return result;
+}
+
+// ============ Calendar Agent Session Management ============
+
+let activeCalendarAgentSession: CalendarAgentSession | null = null;
+let lastCalendarAgentProgress: CalendarAgentProgress | null = null;
+
+interface StartCalendarAgentMessage {
+  type: 'START_CALENDAR_AGENT';
+  apiKey?: string;
+  provider?: AIProvider;
+  tabId?: number;
+}
+
+async function handleStartCalendarAgent(message: StartCalendarAgentMessage): Promise<ExtractedEvent[]> {
+  if (activeCalendarAgentSession) {
+    throw new Error('A calendar agent session is already running. Stop it first.');
+  }
+
+  const provider = message.provider || await getAIProvider();
+  const apiKey = message.apiKey;
+
+  // Get the active tab if not specified
+  let tabId = message.tabId;
+  if (!tabId) {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) throw new Error('No active tab found');
+    tabId = tab.id;
+  }
+
+  const onProgress: ProgressCallback = (progress) => {
+    lastCalendarAgentProgress = progress;
+    // Broadcast to any listening sidepanel
+    chrome.runtime.sendMessage({
+      type: 'CALENDAR_AGENT_PROGRESS',
+      progress,
+    }).catch(() => {
+      // Sidepanel might not be listening — that's OK
+    });
+  };
+
+  activeCalendarAgentSession = new CalendarAgentSession(
+    tabId,
+    apiKey,
+    provider,
+    onProgress
+  );
+
+  try {
+    const events = await activeCalendarAgentSession.run();
+    return events;
+  } finally {
+    activeCalendarAgentSession = null;
+  }
+}
+
+function handleStopCalendarAgent(): void {
+  if (activeCalendarAgentSession) {
+    activeCalendarAgentSession.abort();
+    activeCalendarAgentSession = null;
+    lastCalendarAgentProgress = null;
+    console.log('[Ambient] Calendar agent session stopped by user');
+  }
+}
+
+interface CategorizeEventsMessage {
+  type: 'CATEGORIZE_EVENTS';
+  events: ExtractedEvent[];
+}
+
+async function handleCategorizeEvents(message: CategorizeEventsMessage): Promise<EventCategory[]> {
+  console.log('[Ambient] Categorize events called, count:', message.events?.length);
+
+  if (!message.events || message.events.length === 0) {
+    throw new Error('No events provided for categorization');
+  }
+
+  return categorizeEvents(message.events);
 }
 
 console.log('Ambient Extension background service worker loaded');

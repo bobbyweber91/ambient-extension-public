@@ -1,0 +1,1 @@
+export { WhatsAppPlatform } from './parser';

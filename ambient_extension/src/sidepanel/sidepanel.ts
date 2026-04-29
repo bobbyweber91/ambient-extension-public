@@ -3,7 +3,7 @@
  * Handles settings, status display, and event extraction workflow
  */
 
-import type { ExtensionStatus, ExtractedEvent, MatchResult, ConversationDict, CalendarEvent, FieldDifferences, DateTimeInfo } from '../types';
+import type { ExtensionStatus, ExtractedEvent, MatchResult, ConversationDict, CalendarEvent, FieldDifferences, DateTimeInfo, EventCategory, ConversationListItem } from '../types';
 import { 
   saveGeminiKey, 
   getGeminiKey,
@@ -18,6 +18,8 @@ import {
   isAIProviderConfigured,
   saveScrollBackDays,
   getScrollBackDays,
+  saveAdditionalConversations,
+  getAdditionalConversations,
   saveDebugMode,
   getDebugMode,
   getDailyExtractCount,
@@ -27,18 +29,33 @@ import {
   getDailyExtractLimit,
   saveIsAmbientUser,
   getIsAmbientUser,
+  saveSelectedCalendarId,
+  getSelectedCalendarId,
+  upsertCreatedTrip,
+  getCreatedTrips,
+  removeCreatedTrip,
+  findCreatedTripByConversationTitle,
   DAILY_EXTRACT_LIMIT,
-  type AIProvider
+  type AIProvider,
+  type CreatedTripEntry,
 } from '../lib/storage';
 import {
   getCalendarToken,
   disconnectCalendar,
   getConnectionStatus
 } from '../lib/calendarAuth';
-import { getPrimaryCalendar, getEvents, getEventsFromAllCalendars, getDateRange, createEvent, updateEvent, getOrCreateAmbientCalendar } from '../lib/calendarApi';
+import { getPrimaryCalendar, getEvents, getEventsFromAllCalendars, getDateRange, createEvent, updateEvent, getOrCreateAmbientCalendar, listCalendars, createCalendar } from '../lib/calendarApi';
 import { generateEventExtractionPrompt } from '../llm/extraction';
 import { generateMatchInstructions } from '../llm/matching';
 import { formatDateTimeForDisplay, hasDifferences } from '../llm/matching';
+import { TabTracker } from '../lib/tabTracker';
+
+const SUPPORTED_PLATFORM_HOSTS = ['messages.google.com', 'www.messenger.com'];
+
+function isSupportedPlatformUrl(url: string | undefined): boolean {
+  if (!url) return false;
+  return SUPPORTED_PLATFORM_HOSTS.some(host => url.includes(host));
+}
 
 // UI Elements
 let statusEl: HTMLElement | null;
@@ -97,6 +114,12 @@ let errorBanner: HTMLElement | null;
 let errorMessage: HTMLElement | null;
 let dismissErrorBtn: HTMLElement | null;
 
+// Paused Overlay / New Window Tip Elements
+let pausedOverlay: HTMLElement | null;
+let pausedTabNameEl: HTMLElement | null;
+let switchBackBtn: HTMLElement | null;
+let openNewWindowBtn: HTMLElement | null;
+
 // Ambient Profile Elements
 let profileStatusIndicator: HTMLElement | null;
 let profileStatusText: HTMLElement | null;
@@ -126,8 +149,17 @@ let debugSection: HTMLElement | null;
 let logSection: HTMLElement | null;
 let modalDebugToggle: HTMLInputElement | null;
 
-// Scroll Back Days UI Element
+// Scroll Back Days / Additional Conversations UI Elements
 let scrollBackDaysInput: HTMLInputElement | null;
+let additionalConversationsInput: HTMLInputElement | null;
+
+// Multi-conversation UI Elements
+let multiProgressSection: HTMLElement | null;
+let multiProgressStatus: HTMLElement | null;
+let multiProgressBar: HTMLElement | null;
+let multiResultsSection: HTMLElement | null;
+let multiResultsContainer: HTMLElement | null;
+let singleResultsSection: HTMLElement | null;
 
 // Mode Selection View Elements
 let modeSelectView: HTMLElement | null;
@@ -142,8 +174,6 @@ let importSettingsBtn: HTMLElement | null;
 let importExtractBtn: HTMLButtonElement | null;
 let importStatusEl: HTMLElement | null;
 let importResultsEl: HTMLElement | null;
-let importMatchedSection: HTMLElement | null;
-let importMatchedResultsEl: HTMLElement | null;
 let importLogEl: HTMLElement | null;
 let importErrorBanner: HTMLElement | null;
 let importErrorMessage: HTMLElement | null;
@@ -155,6 +185,28 @@ let fileNameEl: HTMLElement | null;
 let fileRemoveBtn: HTMLElement | null;
 let mainBackBtn: HTMLElement | null;
 
+// Calendar Agent View Elements
+let agentView: HTMLElement | null;
+let agentBackBtn: HTMLElement | null;
+let agentStartBtn: HTMLButtonElement | null;
+let agentStopBtn: HTMLButtonElement | null;
+let agentStatusEl: HTMLElement | null;
+let agentPhaseEl: HTMLElement | null;
+let agentIterationEl: HTMLElement | null;
+let agentProgressSection: HTMLElement | null;
+let agentEventsCountEl: HTMLElement | null;
+let agentDateRangeEl: HTMLElement | null;
+let agentPlanStepsEl: HTMLElement | null;
+let agentUnknownPlatformNotice: HTMLElement | null;
+let agentResultsSection: HTMLElement | null;
+let agentResultsList: HTMLElement | null;
+let modeWebpageBtn: HTMLElement | null;
+
+// Calendar Agent State
+let agentRunning = false;
+let agentPageUrl: string | null = null;
+let agentPageUrlSubmitted = false;
+
 // Import State
 let selectedFile: File | null = null;
 
@@ -164,6 +216,21 @@ let lastParsedConversation: ConversationDict | null = null;
 let lastExtractedEvents: ExtractedEvent[] | null = null;
 let lastMatchResults: MatchResult[] | null = null;
 
+// Multi-conversation state
+interface ConversationResult {
+  conversation: ConversationDict;
+  extractedEvents: ExtractedEvent[] | null;
+  matchResults: MatchResult[] | null;
+  status: 'pending' | 'extracting' | 'matching' | 'complete' | 'error';
+  error?: string;
+}
+let multiConversationResults: ConversationResult[] = [];
+
+// Filter State
+let filterCategories: EventCategory[] = [];
+let activeFilterIds: Set<string> = new Set();
+let filterEventsSource: ExtractedEvent[] = [];
+
 // Debug State
 let debugConversation: ConversationDict | null = null;
 let debugExtractedEvents: ExtractedEvent[] | null = null;
@@ -172,6 +239,35 @@ let debugCalendarInput: CalendarEvent[] | null = null;
 // Edit State - stores user modifications to match cards
 let editedEvents: Map<string, Partial<CalendarEvent>> = new Map();
 let cardsInEditMode: Set<string> = new Set();
+
+// Tab tracking
+const tabTracker = new TabTracker({
+  onPaused(tabTitle: string) {
+    log(`Extraction paused — switched away from "${tabTitle}". Switch back to continue.`);
+    showPausedOverlay(tabTitle);
+  },
+  onResumed() {
+    log('Extraction resumed — tab is active again.');
+    hidePausedOverlay();
+  },
+  onTabClosed() {
+    log('Tracked Google Messages tab was closed.');
+    hidePausedOverlay();
+    showErrorBanner('The Google Messages tab was closed. Please reopen it and try again.');
+  },
+});
+
+function showPausedOverlay(tabTitle: string) {
+  if (pausedOverlay) pausedOverlay.classList.add('active');
+  if (pausedTabNameEl) pausedTabNameEl.textContent = tabTitle ? `Tab: ${tabTitle}` : '';
+}
+
+function hidePausedOverlay() {
+  if (pausedOverlay) pausedOverlay.classList.remove('active');
+}
+
+// Calendar selection state - which calendar to add new events to
+let selectedCalendarId: string | null = null;
 
 // Validation result interface
 interface ValidationResult {
@@ -240,6 +336,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   errorMessage = document.getElementById('error-message');
   dismissErrorBtn = document.getElementById('dismiss-error-btn');
 
+  // Paused overlay / new window tip elements
+  pausedOverlay = document.getElementById('paused-overlay');
+  pausedTabNameEl = document.getElementById('paused-tab-name');
+  switchBackBtn = document.getElementById('switch-back-btn');
+  openNewWindowBtn = document.getElementById('open-new-window-btn');
+
   // Ambient Profile elements
   profileStatusIndicator = document.getElementById('profile-status-indicator');
   profileStatusText = document.getElementById('profile-status-text');
@@ -271,14 +373,40 @@ document.addEventListener('DOMContentLoaded', async () => {
   logSection = document.querySelector('.log-section');
   modalDebugToggle = document.getElementById('modal-debug-toggle') as HTMLInputElement;
 
-  // Scroll back days input
+  // Scroll back days / additional conversations inputs
   scrollBackDaysInput = document.getElementById('scroll-back-days') as HTMLInputElement;
+  additionalConversationsInput = document.getElementById('additional-conversations') as HTMLInputElement;
+
+  // Multi-conversation UI
+  multiProgressSection = document.getElementById('multi-progress-section');
+  multiProgressStatus = document.getElementById('multi-progress-status');
+  multiProgressBar = document.getElementById('multi-progress-bar');
+  multiResultsSection = document.getElementById('multi-results-section');
+  multiResultsContainer = document.getElementById('multi-results-container');
+  singleResultsSection = document.getElementById('single-results-section');
 
   // Mode Selection View elements
   modeSelectView = document.getElementById('mode-select-view');
   modeMessagesBtn = document.getElementById('mode-messages-btn');
   modeImportBtn = document.getElementById('mode-import-btn');
   modeSettingsBtn = document.getElementById('mode-settings-btn');
+  modeWebpageBtn = document.getElementById('mode-webpage-btn');
+
+  // Calendar Agent View elements
+  agentView = document.getElementById('agent-view');
+  agentBackBtn = document.getElementById('agent-back-btn');
+  agentStartBtn = document.getElementById('agent-start-btn') as HTMLButtonElement;
+  agentStopBtn = document.getElementById('agent-stop-btn') as HTMLButtonElement;
+  agentStatusEl = document.getElementById('agent-status');
+  agentPhaseEl = document.getElementById('agent-phase');
+  agentIterationEl = document.getElementById('agent-iteration');
+  agentProgressSection = document.getElementById('agent-progress-section');
+  agentEventsCountEl = document.getElementById('agent-events-count');
+  agentDateRangeEl = document.getElementById('agent-date-range');
+  agentPlanStepsEl = document.getElementById('agent-plan-steps');
+  agentUnknownPlatformNotice = document.getElementById('agent-unknown-platform-notice');
+  agentResultsSection = document.getElementById('agent-results-section');
+  agentResultsList = document.getElementById('agent-results-list');
 
   // Import View elements
   importView = document.getElementById('import-view');
@@ -287,8 +415,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   importExtractBtn = document.getElementById('import-extract-btn') as HTMLButtonElement;
   importStatusEl = document.getElementById('import-status');
   importResultsEl = document.getElementById('import-results');
-  importMatchedSection = document.getElementById('import-matched-section');
-  importMatchedResultsEl = document.getElementById('import-matched-results');
   importLogEl = document.getElementById('import-log');
   importErrorBanner = document.getElementById('import-error-banner');
   importErrorMessage = document.getElementById('import-error-message');
@@ -323,6 +449,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   modalConnectCalendarBtn?.addEventListener('click', handleModalCalendarConnect);
   dismissErrorBtn?.addEventListener('click', hideErrorBanner);
 
+  // Paused overlay / new window tip listeners
+  switchBackBtn?.addEventListener('click', () => tabTracker.switchToTrackedTab());
+  openNewWindowBtn?.addEventListener('click', () => {
+    chrome.windows.create({ url: 'about:blank', focused: true });
+  });
+
   // Ambient Profile check listeners
   checkProfileBtn?.addEventListener('click', handleCheckProfile);
   modalCheckProfileBtn?.addEventListener('click', handleCheckProfile);
@@ -335,8 +467,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   debugMatchPromptBtn?.addEventListener('click', handleDebugMatchPrompt);
   debugLoadEventsBtn?.addEventListener('click', handleDebugLoadEvents);
 
-  // Scroll back days event listener
+  // Scroll back days / additional conversations event listeners
   scrollBackDaysInput?.addEventListener('change', handleScrollBackDaysChange);
+  additionalConversationsInput?.addEventListener('change', handleAdditionalConversationsChange);
 
   // Debug toggle event listener
   modalDebugToggle?.addEventListener('change', handleDebugToggleChange);
@@ -344,8 +477,23 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Mode selection listeners
   modeMessagesBtn?.addEventListener('click', () => showView('main'));
   modeImportBtn?.addEventListener('click', () => showView('import'));
+  modeWebpageBtn?.addEventListener('click', () => {
+    showView('agent');
+    handleAgentStart();
+  });
   modeSettingsBtn?.addEventListener('click', showSettingsModal);
   mainBackBtn?.addEventListener('click', () => showView('mode-select'));
+
+  // Calendar Agent view listeners
+  agentBackBtn?.addEventListener('click', () => showView('mode-select'));
+  agentStartBtn?.addEventListener('click', handleAgentStart);
+  agentStopBtn?.addEventListener('click', handleAgentStop);
+  document.getElementById('agent-submit-url-link')?.addEventListener('click', handleSubmitPageUrl);
+  document.getElementById('agent-settings-btn')?.addEventListener('click', showSettingsModal);
+  document.getElementById('agent-dismiss-error-btn')?.addEventListener('click', () => {
+    const banner = document.getElementById('agent-error-banner');
+    if (banner) banner.classList.remove('visible');
+  });
 
   // Import view listeners
   importBackBtn?.addEventListener('click', () => showView('mode-select'));
@@ -377,18 +525,24 @@ document.addEventListener('DOMContentLoaded', async () => {
  */
 async function loadSettings() {
   try {
-    const [hasKey, userName, calendarStatus, aiProvider, scrollBackDays, debugMode] = await Promise.all([
+    const [hasKey, userName, calendarStatus, aiProvider, scrollBackDays, additionalConvs, debugMode] = await Promise.all([
       hasGeminiKey(),
       getUserName(),
       getConnectionStatus(),
       getAIProvider(),
       getScrollBackDays(),
+      getAdditionalConversations(),
       getDebugMode()
     ]);
 
     // Set scroll back days input value
     if (scrollBackDaysInput) {
       scrollBackDaysInput.value = scrollBackDays.toString();
+    }
+
+    // Set additional conversations input value
+    if (additionalConversationsInput) {
+      additionalConversationsInput.value = additionalConvs.toString();
     }
 
     // Set debug toggle and update visibility
@@ -445,8 +599,8 @@ function checkSetupComplete(hasName: boolean, aiConfigured: boolean, hasCalendar
 /**
  * Show the specified view
  */
-function showView(viewName: 'get-started' | 'mode-select' | 'main' | 'import') {
-  const allViews = [getStartedView, modeSelectView, mainView, importView];
+function showView(viewName: 'get-started' | 'mode-select' | 'main' | 'import' | 'agent') {
+  const allViews = [getStartedView, modeSelectView, mainView, importView, agentView];
   allViews.forEach(v => v?.classList.remove('active'));
 
   switch (viewName) {
@@ -455,12 +609,18 @@ function showView(viewName: 'get-started' | 'mode-select' | 'main' | 'import') {
       break;
     case 'mode-select':
       modeSelectView?.classList.add('active');
+      // Refresh My Trips list every time the user lands here so newly created / updated trips
+      // appear without needing a sidepanel reload.
+      void renderMyTripsSection();
       break;
     case 'main':
       mainView?.classList.add('active');
       break;
     case 'import':
       importView?.classList.add('active');
+      break;
+    case 'agent':
+      agentView?.classList.add('active');
       break;
   }
 }
@@ -1274,6 +1434,24 @@ async function handleScrollBackDaysChange() {
 }
 
 /**
+ * Handle additional conversations input change
+ */
+async function handleAdditionalConversationsChange() {
+  const value = parseInt(additionalConversationsInput?.value || '0', 10);
+  const count = Math.max(0, Math.min(25, isNaN(value) ? 0 : value));
+
+  if (additionalConversationsInput) {
+    additionalConversationsInput.value = count.toString();
+  }
+
+  try {
+    await saveAdditionalConversations(count);
+  } catch (error) {
+    log(`Error saving additional conversations: ${(error as Error).message}`);
+  }
+}
+
+/**
  * Handle debug toggle change
  */
 async function handleDebugToggleChange() {
@@ -1351,23 +1529,33 @@ async function handleExtractClick() {
     
     // Disable button during processing
     if (extractBtn) extractBtn.disabled = true;
-    
+
+    // Check how many additional conversations to scan
+    const additionalConvCount = await getAdditionalConversations();
+
+    if (additionalConvCount > 0) {
+      await handleMultiConversationExtract(additionalConvCount);
+      return;
+    }
+
     updateStatus('parsing');
     log('Parsing conversation from DOM...');
 
-    // Get active tab
+    // Get active tab and start tracking it
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     
     if (!tab.id) {
       throw new Error('No active tab found');
     }
     
-    if (!tab.url?.includes('messages.google.com')) {
-      throw new Error('This extension only works at messages.google.com');
+    if (!isSupportedPlatformUrl(tab.url)) {
+      throw new Error('Please open a supported page first. Supported platforms:\n• messages.google.com\n• www.messenger.com');
     }
 
+    tabTracker.startTracking(tab.id, tab.windowId!, tab.title ?? 'Messages');
+
     // Check if we're on a conversation page
-    const checkResult = await chrome.tabs.sendMessage(tab.id, { type: 'CHECK_PAGE' });
+    const checkResult: any = await tabTracker.sendMessage({ type: 'CHECK_PAGE' });
     if (!checkResult?.isOnConversation) {
       throw new Error('Please open a specific conversation (not just the message list)');
     }
@@ -1378,14 +1566,13 @@ async function handleExtractClick() {
       updateStatus('scrolling');
       log(`Scrolling back ${scrollBackDays} days to load older messages...`);
       
-      const scrollResult = await chrome.tabs.sendMessage(tab.id, { 
+      const scrollResult: any = await tabTracker.sendMessage({ 
         type: 'SCROLL_BACK_DAYS', 
         days: scrollBackDays 
       });
       
       if (!scrollResult.success) {
         log(`Scroll warning: ${scrollResult.error}`);
-        // Continue with parsing even if scrolling had issues
       } else if (scrollResult.reachedTarget) {
         log(`Successfully loaded messages from ${scrollBackDays} days ago`);
       } else {
@@ -1394,7 +1581,7 @@ async function handleExtractClick() {
     }
 
     // Request DOM parsing from content script
-    const parseResult = await chrome.tabs.sendMessage(tab.id, { type: 'PARSE_DOM' });
+    const parseResult: any = await tabTracker.sendMessage({ type: 'PARSE_DOM' });
     
     if (!parseResult.success) {
       throw new Error(parseResult.error);
@@ -1424,7 +1611,7 @@ async function handleExtractClick() {
       throw new Error('Please configure your Gemini API key in settings');
     }
 
-    // Call LLM for event extraction via background script
+    // LLM extraction runs in the background — no tab dependency
     updateStatus('extracting');
     const providerName = aiProvider === 'ambient_ai' ? 'AmbientAI' : 'Gemini';
     log(`Extracting events with ${providerName}... (this may take 10-30 seconds)`);
@@ -1438,13 +1625,10 @@ async function handleExtractClick() {
     });
 
     if (!extractResult.success) {
-      // Check if this is a rate limit error from the server (only applies to Ambient AI)
       if (aiProvider === 'ambient_ai' && extractResult.error?.includes('Rate limit exceeded')) {
-        // Server says limit reached - sync local count to max
         const currentCount = await getDailyExtractCount();
         const limit = await getDailyExtractLimit();
         if (currentCount < limit) {
-          // Local count doesn't match server - user likely tried to reset it
           await setDailyExtractCount(limit);
         }
         await handleRateLimitReached();
@@ -1453,13 +1637,11 @@ async function handleExtractClick() {
       throw new Error(extractResult.error);
     }
     
-    // Save ambient user status from API response (only for Ambient AI provider)
     if (aiProvider === 'ambient_ai' && extractResult.isAmbientUser !== undefined) {
       await saveIsAmbientUser(extractResult.isAmbientUser);
       await updateAmbientProfileStatus();
     }
     
-    // Increment local counter on successful extraction (only for Ambient AI provider)
     if (aiProvider === 'ambient_ai') {
       await incrementDailyExtractCount();
     }
@@ -1467,16 +1649,13 @@ async function handleExtractClick() {
     const events: ExtractedEvent[] = extractResult.events;
     lastExtractedEvents = events;
     
-    // Also update debug state so debug tools can access extracted events
     debugExtractedEvents = events;
     updateDebugButtonStates();
     
     log(`AI found ${events.length} potential event(s)`);
 
-    // Display the extracted events
     displayExtractedEvents(events);
 
-    // Check if calendar is connected before matching
     const calendarConnected = await isCalendarConnected();
     if (!calendarConnected) {
       log('Calendar not connected - skipping calendar matching');
@@ -1485,7 +1664,6 @@ async function handleExtractClick() {
       return;
     }
 
-    // Trigger calendar matching
     await handleCalendarMatching(events, apiKey);
 
   } catch (error) {
@@ -1499,9 +1677,408 @@ async function handleExtractClick() {
       resultsEl.innerHTML = '<p class="placeholder">Extraction failed. Check the error above for details.</p>';
     }
   } finally {
-    // Re-enable button
+    tabTracker.stopTracking();
+    hidePausedOverlay();
     await updateExtractButtonState();
   }
+}
+
+/**
+ * Multi-conversation extraction flow.
+ * Scans the current conversation plus N additional ones from the sidebar list.
+ */
+async function handleMultiConversationExtract(additionalCount: number) {
+  const totalConversations = 1 + additionalCount;
+  const aiProvider = await getAIProvider();
+
+  try {
+    // Upfront rate limit check for Ambient AI
+    if (aiProvider === 'ambient_ai') {
+      const currentCount = await getDailyExtractCount();
+      const limit = await getDailyExtractLimit();
+      const remaining = limit - currentCount;
+      if (remaining < totalConversations) {
+        showErrorBanner(`You have ${remaining} extraction(s) remaining today, but this will require ${totalConversations}. Reduce the number of conversations or wait until tomorrow.`);
+        return;
+      }
+    }
+
+    // Get active tab and start tracking it
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab.id) throw new Error('No active tab found');
+    if (!isSupportedPlatformUrl(tab.url)) throw new Error('Please open a supported page first. Supported platforms:\n• messages.google.com\n• www.messenger.com');
+
+    tabTracker.startTracking(tab.id, tab.windowId!, tab.title ?? 'Messages');
+
+    const checkResult: any = await tabTracker.sendMessage({ type: 'CHECK_PAGE' });
+    if (!checkResult?.isOnConversation) throw new Error('Please open a specific conversation first');
+
+    const [apiKey, userName] = await Promise.all([getGeminiKey(), getUserName()]);
+    if (!userName) throw new Error('Please enter your name in settings');
+    if (aiProvider === 'gemini_key' && !apiKey) throw new Error('Please configure your Gemini API key in settings');
+
+    const scrollBackDays = await getScrollBackDays();
+
+    // Switch to multi-conversation UI
+    if (singleResultsSection) singleResultsSection.style.display = 'none';
+    if (conversationSection) conversationSection.style.display = 'none';
+    if (matchedSection) matchedSection.style.display = 'none';
+    if (multiProgressSection) multiProgressSection.style.display = 'block';
+    if (multiResultsSection) multiResultsSection.style.display = 'block';
+    if (multiResultsContainer) multiResultsContainer.innerHTML = '';
+
+    // Get the conversation list for navigating to additional conversations
+    const listResult: any = await tabTracker.sendMessage({ type: 'GET_CONVERSATION_LIST' });
+    const conversationList: ConversationListItem[] = listResult.success ? listResult.conversations : [];
+
+    // Figure out which conversation indices to process.
+    const selectedEl: any = await tabTracker.sendMessage({ type: 'PARSE_DOM' });
+    const currentTitle = selectedEl.success ? (selectedEl.conversation as ConversationDict).title : '';
+
+    // Build the processing queue: current first, then top-N from sidebar
+    interface QueueItem { index: number | null; name: string; }
+    const queue: QueueItem[] = [{ index: null, name: currentTitle || 'Current conversation' }];
+
+    let added = 0;
+    for (const item of conversationList) {
+      if (added >= additionalCount) break;
+      if (item.name === currentTitle) continue;
+      queue.push({ index: item.index, name: item.name });
+      added++;
+    }
+
+    // Initialize results
+    multiConversationResults = queue.map(q => ({
+      conversation: { title: q.name, structured_messages: [] },
+      extractedEvents: null,
+      matchResults: null,
+      status: 'pending' as const,
+    }));
+    renderMultiConversationResults();
+
+    // Phase 1: Collect conversations and fire off extractions
+    const extractionPromises: { idx: number; promise: Promise<any> }[] = [];
+
+    for (let i = 0; i < queue.length; i++) {
+      const qItem = queue[i];
+      updateMultiProgress(i + 1, queue.length, `Scanning "${qItem.name}"...`);
+      multiConversationResults[i].status = 'extracting';
+      renderMultiConversationResults();
+
+      // Navigate to the conversation if it's not the first (current) one
+      if (i > 0 && qItem.index !== null) {
+        log(`Navigating to "${qItem.name}"...`);
+        const clickResult: any = await tabTracker.sendMessage({
+          type: 'CLICK_CONVERSATION',
+          index: qItem.index,
+        });
+        if (!clickResult.success) {
+          multiConversationResults[i].status = 'error';
+          multiConversationResults[i].error = 'Failed to open conversation';
+          renderMultiConversationResults();
+          continue;
+        }
+      }
+
+      // Scroll back if needed
+      if (scrollBackDays > 0) {
+        log(`Scrolling back ${scrollBackDays} days in "${qItem.name}"...`);
+        await tabTracker.sendMessage({ type: 'SCROLL_BACK_DAYS', days: scrollBackDays });
+      }
+
+      // Parse the DOM
+      const parseResult: any = await tabTracker.sendMessage({ type: 'PARSE_DOM' });
+      if (!parseResult.success) {
+        multiConversationResults[i].status = 'error';
+        multiConversationResults[i].error = parseResult.error;
+        renderMultiConversationResults();
+        continue;
+      }
+
+      const conversation: ConversationDict = parseResult.conversation;
+      multiConversationResults[i].conversation = conversation;
+      log(`Parsed "${conversation.title}": ${conversation.structured_messages.length} messages`);
+
+      // Fire extraction (don't await — runs in the background service worker)
+      const extractPromise = chrome.runtime.sendMessage({
+        type: 'EXTRACT_EVENTS',
+        conversation,
+        apiKey: apiKey || '',
+        userName,
+        provider: aiProvider,
+      });
+      extractionPromises.push({ idx: i, promise: extractPromise });
+      renderMultiConversationResults();
+    }
+
+    // Navigate back to the first conversation if we moved away
+    if (queue.length > 1 && queue[0].index === null && conversationList.length > 0) {
+      const firstItem = conversationList.find(c => c.name === currentTitle);
+      if (firstItem) {
+        await tabTracker.sendMessage({ type: 'CLICK_CONVERSATION', index: firstItem.index });
+      }
+    }
+
+    // Phase 2: Collect extraction results (background ops — no tab dependency)
+    updateMultiProgress(queue.length, queue.length, 'Waiting for AI extraction results...');
+
+    for (const { idx, promise } of extractionPromises) {
+      try {
+        const result = await promise;
+        if (!result.success) {
+          multiConversationResults[idx].status = 'error';
+          multiConversationResults[idx].error = result.error;
+        } else {
+          multiConversationResults[idx].extractedEvents = result.events;
+          multiConversationResults[idx].status = 'complete';
+          log(`Extraction complete for "${multiConversationResults[idx].conversation.title}": ${result.events.length} event(s)`);
+
+          if (aiProvider === 'ambient_ai') {
+            await incrementDailyExtractCount();
+            if (result.isAmbientUser !== undefined) {
+              await saveIsAmbientUser(result.isAmbientUser);
+            }
+          }
+        }
+      } catch (error) {
+        multiConversationResults[idx].status = 'error';
+        multiConversationResults[idx].error = (error as Error).message;
+      }
+      renderMultiConversationResults();
+    }
+
+    // Phase 3: Calendar matching for all extracted events (background ops)
+    const calendarConnected = await isCalendarConnected();
+    if (calendarConnected) {
+      for (let i = 0; i < multiConversationResults.length; i++) {
+        const cr = multiConversationResults[i];
+        if (!cr.extractedEvents || cr.extractedEvents.length === 0) continue;
+
+        const futureEvents = cr.extractedEvents.filter(
+          e => (e.event_type === 'full_potential_event_details' || e.event_type === 'incomplete_event_details') && isEventInFuture(e)
+        );
+        if (futureEvents.length === 0) continue;
+
+        cr.status = 'matching';
+        renderMultiConversationResults();
+
+        try {
+          const dateRange = getDateRangeFromEvents(futureEvents);
+          const calendarEvents = await getEventsFromAllCalendars(dateRange.timeMin, dateRange.timeMax);
+
+          const matchResult = await chrome.runtime.sendMessage({
+            type: 'MATCH_EVENTS',
+            extractedEvents: futureEvents,
+            calendarEvents,
+            apiKey: apiKey || '',
+            provider: aiProvider,
+          });
+
+          if (matchResult.success) {
+            cr.matchResults = matchResult.matches;
+          }
+        } catch (error) {
+          log(`Matching error for "${cr.conversation.title}": ${(error as Error).message}`);
+        }
+        cr.status = 'complete';
+        renderMultiConversationResults();
+      }
+    }
+
+    updateMultiProgress(queue.length, queue.length, 'All conversations processed');
+    updateStatus('complete');
+    log('Multi-conversation extraction complete!');
+
+  } catch (error) {
+    updateStatus('error');
+    const errorMsg = (error as Error).message;
+    showErrorBanner(`Multi-conversation extraction failed: ${errorMsg}`);
+    log(`Error: ${errorMsg}`);
+  } finally {
+    tabTracker.stopTracking();
+    hidePausedOverlay();
+    await updateExtractButtonState();
+  }
+}
+
+/**
+ * Update the multi-conversation progress bar
+ */
+function updateMultiProgress(current: number, total: number, statusText: string) {
+  if (multiProgressStatus) {
+    multiProgressStatus.textContent = statusText;
+  }
+  if (multiProgressBar) {
+    const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+    multiProgressBar.style.width = `${pct}%`;
+  }
+}
+
+/**
+ * Render the multi-conversation results UI
+ */
+function renderMultiConversationResults() {
+  if (!multiResultsContainer) return;
+
+  let html = '';
+  multiConversationResults.forEach((cr, groupIdx) => {
+    html += renderConversationGroup(cr, groupIdx);
+  });
+  multiResultsContainer.innerHTML = html;
+
+  // Wire up action listeners inside the groups
+  setupMultiConversationListeners();
+}
+
+/**
+ * Render a single collapsible conversation group
+ */
+function renderConversationGroup(cr: ConversationResult, groupIdx: number): string {
+  const title = escapeHtml(cr.conversation.title || `Conversation ${groupIdx + 1}`);
+  const msgCount = cr.conversation.structured_messages.length;
+
+  let badge = '';
+  let eventSummary = '';
+  switch (cr.status) {
+    case 'pending':
+      badge = '<span class="conv-status-badge pending">Pending</span>';
+      break;
+    case 'extracting':
+      badge = '<span class="conv-status-badge extracting">Extracting...</span>';
+      break;
+    case 'matching':
+      badge = '<span class="conv-status-badge matching">Matching...</span>';
+      break;
+    case 'error':
+      badge = `<span class="conv-status-badge error">Error</span>`;
+      break;
+    case 'complete': {
+      const events = cr.extractedEvents || [];
+      const actionable = events.filter(e => e.event_type !== 'not_an_event');
+      const futureCount = actionable.filter(isEventInFuture).length;
+      badge = '<span class="conv-status-badge complete">Done</span>';
+      eventSummary = futureCount > 0 ? `${futureCount} event(s) found` : 'No events found';
+      break;
+    }
+  }
+
+  // Count new events (no_match) for "Add All New" button
+  const newMatches = (cr.matchResults || []).filter(m => m.match_type === 'no_match');
+  const addAllBtn = newMatches.length > 0
+    ? `<button class="add-all-btn conv-group-add-all" data-group="${groupIdx}">Add All New (${newMatches.length})</button>`
+    : '';
+
+  // Determine if this group should be open
+  const isOpen = cr.status === 'extracting' || cr.status === 'matching'
+    || (cr.status === 'complete' && (cr.extractedEvents?.length ?? 0) > 0);
+
+  let inner = '';
+  if (cr.status === 'error') {
+    inner = `<p class="conv-group-error">${escapeHtml(cr.error || 'Unknown error')}</p>`;
+  } else if (cr.status === 'complete' && cr.extractedEvents) {
+    inner = renderConversationGroupEvents(cr, groupIdx);
+  } else if (cr.status === 'extracting' || cr.status === 'matching') {
+    inner = '<div class="conv-group-loading">Processing...</div>';
+  }
+
+  return `<details class="conversation-group" data-group="${groupIdx}" ${isOpen ? 'open' : ''}>
+    <summary class="conversation-group-header">
+      <span class="conv-group-title">${title}</span>
+      <span class="conv-group-msg-count">${msgCount} msg${msgCount !== 1 ? 's' : ''}</span>
+      ${badge}
+      <span class="conv-group-summary">${eventSummary}</span>
+      ${addAllBtn}
+    </summary>
+    <div class="conversation-group-body">
+      <p class="conv-group-detail">${msgCount} message${msgCount !== 1 ? 's' : ''} searched</p>
+      ${inner}
+    </div>
+  </details>`;
+}
+
+/**
+ * Render the event cards and match cards inside a conversation group
+ */
+function renderConversationGroupEvents(cr: ConversationResult, groupIdx: number): string {
+  if (!cr.extractedEvents || cr.extractedEvents.length === 0) {
+    return '<p class="placeholder">No events found in this conversation.</p>';
+  }
+
+  const actionable = cr.extractedEvents.filter(e => e.event_type !== 'not_an_event');
+  const futureEvents = actionable.filter(isEventInFuture);
+
+  if (futureEvents.length === 0) {
+    return '<p class="placeholder">No upcoming events found.</p>';
+  }
+
+  let html = '';
+
+  if (cr.matchResults && cr.matchResults.length > 0) {
+    const byType = {
+      no_match: cr.matchResults.filter(m => m.match_type === 'no_match'),
+      certain_update: cr.matchResults.filter(m => m.match_type === 'certain_update'),
+      possible_update: cr.matchResults.filter(m => m.match_type === 'possible_update'),
+      no_update: cr.matchResults.filter(m => m.match_type === 'no_update'),
+    };
+
+    if (byType.no_match.length > 0) {
+      html += `<p class="match-section-header">New Events (${byType.no_match.length})</p>`;
+      byType.no_match.forEach((match, idx) => {
+        html += renderMatchCard(match, `multi_${groupIdx}_no_match_${idx}`);
+      });
+    }
+    if (byType.certain_update.length > 0) {
+      html += `<p class="match-section-header">Events to Update (${byType.certain_update.length})</p>`;
+      byType.certain_update.forEach((match, idx) => {
+        html += renderMatchCard(match, `multi_${groupIdx}_certain_update_${idx}`);
+      });
+    }
+    if (byType.possible_update.length > 0) {
+      html += `<p class="match-section-header">Review Needed (${byType.possible_update.length})</p>`;
+      byType.possible_update.forEach((match, idx) => {
+        html += renderMatchCard(match, `multi_${groupIdx}_possible_update_${idx}`);
+      });
+    }
+    if (byType.no_update.length > 0) {
+      html += `<p class="match-section-header">Already in Calendar (${byType.no_update.length})</p>`;
+      byType.no_update.forEach((match, idx) => {
+        html += renderMatchCard(match, `multi_${groupIdx}_no_update_${idx}`);
+      });
+    }
+  } else {
+    futureEvents.forEach(event => {
+      html += renderEventCard(event, false);
+    });
+  }
+
+  return html;
+}
+
+/**
+ * Wire up action listeners inside multi-conversation result groups.
+ */
+function setupMultiConversationListeners() {
+  document.querySelectorAll('.conv-group-add-all').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const groupIdx = parseInt((btn as HTMLElement).dataset.group || '0', 10);
+      const cr = multiConversationResults[groupIdx];
+      if (!cr?.matchResults) return;
+
+      const newMatches = cr.matchResults.filter(m => m.match_type === 'no_match');
+      for (const match of newMatches) {
+        const cardId = `multi_${groupIdx}_no_match_${cr.matchResults.indexOf(match)}`;
+        const addBtn = document.querySelector(`.action-btn.add-btn[data-card-id="${cardId}"]`) as HTMLButtonElement | null;
+        if (addBtn && !addBtn.disabled) {
+          addBtn.click();
+          await new Promise(r => setTimeout(r, 300));
+        }
+      }
+    });
+  });
+
+  setupMatchActionListeners();
 }
 
 /**
@@ -1799,6 +2376,7 @@ function displayExtractedEvents(events: ExtractedEvent[]) {
   // Has future events (and possibly past events)
   resultsEl.innerHTML = `
     <div class="events-list">
+      ${renderCreateTripBanner(actionableEvents)}
       <p class="events-header">Found ${futureEvents.length} upcoming event(s):</p>
       ${futureEvents.map(event => renderEventCard(event, false)).join('')}
       ${pastEvents.length > 0 ? `
@@ -1812,9 +2390,367 @@ function displayExtractedEvents(events: ExtractedEvent[]) {
       ${notEventCount > 0 ? `<p class="info-text">(${notEventCount} message(s) contained no plannable events)</p>` : ''}
     </div>
   `;
-  
+
   if (pastEvents.length > 0) {
     setupPastEventsToggle();
+  }
+  setupCreateTripButton(actionableEvents);
+}
+
+// ---------- Create Trip Page flow ----------
+
+function findTripEvent(events: ExtractedEvent[]): ExtractedEvent | null {
+  return events.find(e =>
+    e.event_type === 'full_potential_event_details' &&
+    typeof e.summary === 'string' &&
+    e.summary.toLowerCase().includes('trip')
+  ) || null;
+}
+
+function renderCreateTripBanner(events: ExtractedEvent[]): string {
+  const tripEvent = findTripEvent(events);
+  if (!tripEvent) return '';
+  const summary = escapeHtml(tripEvent.summary || 'Trip');
+  return `
+    <div id="create-trip-banner" class="create-trip-banner">
+      <div class="create-trip-banner-text">
+        <strong>This looks like a trip.</strong>
+        <span>Build a shareable trip page for "${summary}".</span>
+      </div>
+      <button id="create-trip-btn" class="create-trip-btn" type="button">Create trip page</button>
+      <div id="create-trip-status" class="create-trip-status"></div>
+    </div>
+  `;
+}
+
+async function setupCreateTripButton(events: ExtractedEvent[]) {
+  const btn = document.getElementById('create-trip-btn') as HTMLButtonElement | null;
+  const banner = document.getElementById('create-trip-banner');
+  if (!btn) return;
+
+  // Check whether this conversation has already produced a trip page. If so, switch the
+  // primary CTA to an Update flow against the existing trip and offer a secondary "create a
+  // new trip page" link in case the user really wants a fresh trip.
+  let matchingTrip: CreatedTripEntry | null = null;
+  try {
+    const title = lastParsedConversation?.title || '';
+    if (title) {
+      matchingTrip = await findCreatedTripByConversationTitle(title);
+    }
+  } catch (e) {
+    log(`[CreateTripBanner] storage lookup failed: ${e}`);
+  }
+
+  if (matchingTrip) {
+    // Update flow.
+    btn.textContent = 'Update trip page';
+    btn.removeEventListener('click', noop);
+    btn.addEventListener('click', () => handleUpdateTrip(events, matchingTrip!));
+
+    // Inject a small explanatory line + a fallback "create new" link.
+    if (banner) {
+      const textEl = banner.querySelector('.create-trip-banner-text') as HTMLElement | null;
+      if (textEl) {
+        const tripLabel = escapeHtml(matchingTrip.summary || 'this trip');
+        textEl.innerHTML = `
+          <strong>Existing trip detected.</strong>
+          <span>Update "${tripLabel}" with the latest from this conversation, or
+          <a href="#" id="create-new-trip-link" class="create-trip-secondary">create a new trip page</a>
+          if this is a different trip.</span>
+        `;
+        const newLink = textEl.querySelector('#create-new-trip-link') as HTMLAnchorElement | null;
+        newLink?.addEventListener('click', (e) => {
+          e.preventDefault();
+          handleCreateTrip(events);
+        });
+      }
+    }
+  } else {
+    // Default: create flow.
+    btn.addEventListener('click', () => handleCreateTrip(events));
+  }
+}
+
+// Tiny no-op so removeEventListener has a stable reference if we ever need to swap handlers.
+function noop() {}
+
+async function handleCreateTrip(events: ExtractedEvent[]) {
+  const btn = document.getElementById('create-trip-btn') as HTMLButtonElement | null;
+  const status = document.getElementById('create-trip-status');
+  if (!btn || !status) return;
+  const tripEvent = findTripEvent(events);
+  if (!tripEvent) {
+    status.textContent = 'Could not find a trip event in this conversation.';
+    status.className = 'create-trip-status error';
+    return;
+  }
+  const siblings = events.filter(e => e !== tripEvent && e.event_type !== 'not_an_event');
+
+  btn.disabled = true;
+  status.className = 'create-trip-status';
+
+  try {
+    const { createCalendar, setCalendarPublicRead, createEvent } = await import('../lib/calendarApi');
+    const { createTripViaAmbient } = await import('../lib/ambientApi');
+
+    status.textContent = 'Creating trip calendar…';
+    const cal = await createCalendar(tripEvent.summary || 'Trip');
+
+    status.textContent = 'Sharing calendar…';
+    await setCalendarPublicRead(cal.id);
+
+    status.textContent = `Adding ${siblings.length} event(s)…`;
+    for (const ev of siblings) {
+      try {
+        const body: any = {
+          summary: ev.summary,
+          description: ev.description || '',
+        };
+        if (ev.location) body.location = ev.location;
+        if (ev.start) body.start = ev.start;
+        if (ev.end) body.end = ev.end;
+        await createEvent(body, cal.id);
+      } catch (e) {
+        log(`[CreateTrip] failed to insert event "${ev.summary}": ${e}`);
+      }
+    }
+
+    status.textContent = 'Saving trip page…';
+    const result = await createTripViaAmbient(tripEvent, siblings, cal.id, true);
+
+    // Persist locally so the user can find their trips later (and so re-import / "My Trips"
+    // can find them later). Capture the conversation title so re-import detection can match
+    // on the next scrape, and the per-trip Google Calendar id so future flows can write
+    // through directly when needed.
+    try {
+      await upsertCreatedTrip({
+        shareUrl: result.shareUrl,
+        shareToken: result.shareToken,
+        summary: tripEvent.summary,
+        conversationTitle: lastParsedConversation?.title || '',
+        googleCalendarId: cal.id,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (e) {
+      log(`[CreateTrip] failed to persist trip locally: ${e}`);
+    }
+
+    status.innerHTML = `<a href="${escapeHtml(result.shareUrl)}" target="_blank" class="create-trip-link">Open trip page →</a>`;
+    status.className = 'create-trip-status success';
+    btn.textContent = 'Trip created';
+    btn.classList.add('done');
+  } catch (e: any) {
+    log(`[CreateTrip] error: ${e?.message || e}`);
+    status.textContent = `Failed: ${e?.message || 'unknown error'}`;
+    status.className = 'create-trip-status error';
+    btn.disabled = false;
+  }
+}
+
+// ---------- My Trips list (mode-select view) ----------
+//
+// Renders chrome.storage.local.createdTrips into the #my-trips-section. Visible only when
+// at least one trip exists. Lets the user open or remove entries.
+
+function formatTripTimestamp(iso?: string): string {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  } catch {
+    return '';
+  }
+}
+
+async function renderMyTripsSection() {
+  const section = document.getElementById('my-trips-section');
+  const list = document.getElementById('my-trips-list');
+  if (!section || !list) return;
+
+  let trips: CreatedTripEntry[] = [];
+  try {
+    trips = await getCreatedTrips();
+  } catch (e) {
+    log(`[MyTrips] failed to load: ${e}`);
+  }
+
+  if (!trips.length) {
+    section.style.display = 'none';
+    list.innerHTML = '';
+    return;
+  }
+
+  section.style.display = '';
+  list.innerHTML = trips.map((t) => {
+    const ts = formatTripTimestamp(t.lastUpdatedAt || t.createdAt);
+    const titleSuffix = t.conversationTitle
+      ? ` <span class="my-trips-conv">from ${escapeHtml(t.conversationTitle)}</span>`
+      : '';
+    return `
+      <li class="my-trips-item" data-token="${escapeHtml(t.shareToken)}">
+        <a href="${escapeHtml(t.shareUrl)}" target="_blank" class="my-trips-link">
+          <span class="my-trips-summary">${escapeHtml(t.summary || 'Untitled trip')}</span>
+          <span class="my-trips-meta">${escapeHtml(ts)}${titleSuffix}</span>
+        </a>
+        <button type="button" class="my-trips-remove" aria-label="Remove from list" data-token="${escapeHtml(t.shareToken)}">×</button>
+      </li>
+    `;
+  }).join('');
+
+  list.querySelectorAll<HTMLButtonElement>('.my-trips-remove').forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const token = btn.getAttribute('data-token') || '';
+      if (!token) return;
+      try {
+        await removeCreatedTrip(token);
+      } catch (err) {
+        log(`[MyTrips] remove failed: ${err}`);
+      }
+      void renderMyTripsSection();
+    });
+  });
+}
+
+// ---------- Update existing trip (re-import) ----------
+//
+// Triggered when setupCreateTripButton finds a stored trip with a conversation title that
+// matches the current scrape. Compares the new scrape's events against the existing trip's
+// events and PATCHes / POSTs the differences via the trip-edit endpoints. Doesn't delete
+// existing events for now — the safer half of a sync; auto-delete can land in v2 once we're
+// confident about false-removal risk.
+
+function shapesEqual(a: any, b: any): boolean {
+  // Cheap deep-equal for plain JSON-ish structures (date dicts, flight_details). The data
+  // shapes here are tiny (max a handful of keys), so JSON.stringify is fine.
+  if (a == null && b == null) return true;
+  if (a == null || b == null) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function normalizeSummaryForMatch(s: string): string {
+  return (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+async function handleUpdateTrip(events: ExtractedEvent[], existingTrip: CreatedTripEntry) {
+  const btn = document.getElementById('create-trip-btn') as HTMLButtonElement | null;
+  const status = document.getElementById('create-trip-status');
+  if (!btn || !status) return;
+
+  const tripEvent = findTripEvent(events);
+  if (!tripEvent) {
+    status.textContent = 'No trip event found in this conversation.';
+    status.className = 'create-trip-status error';
+    return;
+  }
+  const siblings = events.filter(e => e !== tripEvent && e.event_type !== 'not_an_event');
+
+  btn.disabled = true;
+  status.className = 'create-trip-status';
+  status.textContent = 'Loading existing trip…';
+
+  try {
+    const { getTripDetails, patchTrip, addTripEvent, updateTripEvent } = await import('../lib/ambientApi');
+
+    const detail = await getTripDetails(existingTrip.shareToken);
+    if (!detail) {
+      status.textContent = 'Could not load existing trip — it may have been deleted. Use "create a new trip page" instead.';
+      status.className = 'create-trip-status error';
+      btn.disabled = false;
+      return;
+    }
+
+    // 1. Patch trip metadata if any of summary/location/dates/accommodation changed.
+    const tripPatch: any = {};
+    if (tripEvent.summary && tripEvent.summary !== detail.summary) tripPatch.summary = tripEvent.summary;
+    if (tripEvent.location && tripEvent.location !== detail.location) tripPatch.location = tripEvent.location;
+    if (tripEvent.start && !shapesEqual(tripEvent.start, detail.start)) tripPatch.start = tripEvent.start;
+    if (tripEvent.end && !shapesEqual(tripEvent.end, detail.end)) tripPatch.end = tripEvent.end;
+    const newAccom = (tripEvent.trip_accommodation_details || '').trim();
+    if (newAccom && newAccom !== (detail.accommodation_details || '').trim()) {
+      tripPatch.accommodation_details = newAccom;
+    }
+    if (Object.keys(tripPatch).length > 0) {
+      status.textContent = 'Updating trip details…';
+      const resp = await patchTrip(existingTrip.shareToken, tripPatch);
+      if (!resp.success) {
+        log(`[UpdateTrip] trip patch failed: ${(resp as any).error}`);
+      }
+    }
+
+    // 2. Match scraped sibling events against existing trip events by normalized summary.
+    //    For matched events: PATCH if any field differs.
+    //    For unmatched scraped events: POST as new event under the trip.
+    //    Existing-but-not-scraped events are left alone (no auto-delete in v1).
+    const existingBySummary = new Map<string, typeof detail.events[0]>();
+    for (const ev of detail.events) {
+      if (!ev.is_trip_parent) {
+        existingBySummary.set(normalizeSummaryForMatch(ev.summary), ev);
+      }
+    }
+
+    let updated = 0;
+    let added = 0;
+    let i = 0;
+    for (const ev of siblings) {
+      i++;
+      status.textContent = `Syncing events (${i}/${siblings.length})…`;
+      const key = normalizeSummaryForMatch(ev.summary);
+      const existing = existingBySummary.get(key);
+      try {
+        if (existing) {
+          const patch: any = {};
+          if (ev.summary && ev.summary !== existing.summary) patch.summary = ev.summary;
+          if (ev.description && ev.description !== existing.description) patch.description = ev.description;
+          if (ev.location && ev.location !== existing.location) patch.location = ev.location;
+          if (ev.start && !shapesEqual(ev.start, existing.start)) patch.start = ev.start;
+          if (ev.end && !shapesEqual(ev.end, existing.end)) patch.end = ev.end;
+          if (ev.flight_details && !shapesEqual(ev.flight_details, existing.flight_details)) {
+            patch.flight_details = ev.flight_details;
+          }
+          if (Object.keys(patch).length > 0) {
+            const resp = await updateTripEvent(existingTrip.shareToken, existing.id, patch);
+            if (resp.success) updated++;
+            else log(`[UpdateTrip] PATCH event ${existing.id} failed: ${(resp as any).error}`);
+          }
+        } else {
+          const body: any = { summary: ev.summary };
+          if (ev.description) body.description = ev.description;
+          if (ev.location) body.location = ev.location;
+          if (ev.start) body.start = ev.start;
+          if (ev.end) body.end = ev.end;
+          if (ev.flight_details) body.flight_details = ev.flight_details;
+          const resp = await addTripEvent(existingTrip.shareToken, body);
+          if (resp.success) added++;
+          else log(`[UpdateTrip] POST new event failed: ${(resp as any).error}`);
+        }
+      } catch (e) {
+        log(`[UpdateTrip] error syncing "${ev.summary}": ${e}`);
+      }
+    }
+
+    // Update the local cache with a fresh lastUpdatedAt timestamp.
+    try {
+      await upsertCreatedTrip({
+        ...existingTrip,
+        lastUpdatedAt: new Date().toISOString(),
+      });
+    } catch (e) {
+      log(`[UpdateTrip] failed to update local cache: ${e}`);
+    }
+
+    const summaryLine = `${updated} updated, ${added} new`;
+    status.innerHTML = `${summaryLine} · <a href="${escapeHtml(existingTrip.shareUrl)}" target="_blank" class="create-trip-link">Open trip page →</a>`;
+    status.className = 'create-trip-status success';
+    btn.textContent = 'Trip updated';
+    btn.classList.add('done');
+  } catch (e: any) {
+    log(`[UpdateTrip] error: ${e?.message || e}`);
+    status.textContent = `Failed: ${e?.message || 'unknown error'}`;
+    status.className = 'create-trip-status error';
+    btn.disabled = false;
   }
 }
 
@@ -1900,7 +2836,7 @@ function formatEventDateTime(start?: { date?: string; dateTime?: string }, end?:
 /**
  * Display match results in the matched events section
  */
-function displayMatchResults(matches: MatchResult[]) {
+function displayMatchResults(matches: MatchResult[], isImportView: boolean = false) {
   if (!matchedResultsEl) return;
 
   if (matches.length === 0) {
@@ -1918,12 +2854,47 @@ function displayMatchResults(matches: MatchResult[]) {
 
   let html = '<div class="match-results-list">';
 
+  const hasNewEvents = byType.no_match.length > 0;
+
+  if (!isImportView && hasNewEvents) {
+    // Messages flow: calendar picker above everything
+    html += `<div class="calendar-picker" id="calendar-picker">
+      <label class="calendar-picker-label" for="calendar-select">Add new events to:</label>
+      <div class="calendar-picker-row">
+        <select id="calendar-select" class="calendar-select">
+          <option value="" disabled selected>Loading calendars...</option>
+        </select>
+      </div>
+      <div id="new-calendar-form" class="new-calendar-form" style="display: none;">
+        <input type="text" id="new-calendar-name" class="new-calendar-input" placeholder="e.g., Devin school cal">
+        <button id="create-calendar-btn" class="save-btn">Create</button>
+        <button id="cancel-new-calendar-btn" class="cancel-new-calendar-btn">Cancel</button>
+      </div>
+    </div>`;
+  }
+
   // New events (no_match)
   if (byType.no_match.length > 0) {
-    html += `<div class="match-section-header-row">
-      <p class="match-section-header">New Events (${byType.no_match.length})</p>
-      ${byType.no_match.length > 1 ? `<button class="add-all-btn" data-action="add-all" data-match-type="no_match">Add All to Calendar</button>` : ''}
-    </div>`;
+    if (isImportView) {
+      // Import flow: header, then dropdown + Add All on same line
+      html += `<p class="match-section-header">New Events (${byType.no_match.length})</p>`;
+      html += `<div class="import-calendar-row" id="import-calendar-row">
+        <select id="calendar-select" class="calendar-select import-calendar-select">
+          <option value="" disabled selected>Choose calendar to add events to</option>
+        </select>
+        ${byType.no_match.length > 1 ? `<button class="add-all-btn" data-action="add-all" data-match-type="no_match" disabled>Add All</button>` : ''}
+      </div>
+      <div id="new-calendar-form" class="import-new-calendar-form" style="display: none;">
+        <button id="cancel-new-calendar-btn" class="import-cancel-btn" title="Cancel">&times;</button>
+        <input type="text" id="new-calendar-name" class="new-calendar-input" placeholder="e.g., Devin school cal">
+        <button id="create-calendar-btn" class="save-btn">Create</button>
+      </div>`;
+    } else {
+      html += `<div class="match-section-header-row">
+        <p class="match-section-header">New Events (${byType.no_match.length})</p>
+        ${byType.no_match.length > 1 ? `<button class="add-all-btn" data-action="add-all" data-match-type="no_match">Add All</button>` : ''}
+      </div>`;
+    }
     byType.no_match.forEach((match, idx) => {
       html += renderMatchCard(match, `no_match_${idx}`);
     });
@@ -1961,6 +2932,313 @@ function displayMatchResults(matches: MatchResult[]) {
 
   // Set up event listeners for action buttons
   setupMatchActionListeners();
+
+  // Set up calendar picker
+  if (hasNewEvents) {
+    if (isImportView) {
+      setupImportCalendarPicker();
+    } else {
+      setupCalendarPicker();
+    }
+  }
+}
+
+/**
+ * Set up the calendar picker dropdown, populate with user's calendars,
+ * and handle the "Create new calendar" option.
+ */
+async function setupCalendarPicker() {
+  const selectEl = document.getElementById('calendar-select') as HTMLSelectElement | null;
+  const newCalForm = document.getElementById('new-calendar-form');
+  const newCalNameInput = document.getElementById('new-calendar-name') as HTMLInputElement | null;
+  const createBtn = document.getElementById('create-calendar-btn');
+  const cancelBtn = document.getElementById('cancel-new-calendar-btn');
+
+  if (!selectEl) return;
+
+  // Load persisted calendar selection
+  const persistedId = await getSelectedCalendarId();
+  if (persistedId && !selectedCalendarId) {
+    selectedCalendarId = persistedId;
+  }
+
+  try {
+    const calendars = await listCalendars();
+    const writableCalendars = calendars.filter(c => c.accessRole === 'owner' || c.accessRole === 'writer');
+
+    selectEl.innerHTML = '';
+
+    const ambientCal = writableCalendars.find(c => c.summary.toLowerCase() === 'ambient');
+
+    writableCalendars.forEach(cal => {
+      const option = document.createElement('option');
+      option.value = cal.id;
+      option.textContent = cal.summary + (cal.primary ? ' (primary)' : '');
+      selectEl.appendChild(option);
+    });
+
+    const createOption = document.createElement('option');
+    createOption.value = '__create_new__';
+    createOption.textContent = '+ Create new calendar...';
+    selectEl.appendChild(createOption);
+
+    if (selectedCalendarId && writableCalendars.some(c => c.id === selectedCalendarId)) {
+      selectEl.value = selectedCalendarId;
+    } else if (ambientCal) {
+      selectEl.value = ambientCal.id;
+      selectedCalendarId = ambientCal.id;
+      saveSelectedCalendarId(ambientCal.id);
+    } else {
+      // No Ambient calendar exists — show "Ambient" as default text; will auto-create on first add
+      const ambientPlaceholder = document.createElement('option');
+      ambientPlaceholder.value = '__ambient_auto__';
+      ambientPlaceholder.textContent = 'Ambient';
+      selectEl.insertBefore(ambientPlaceholder, selectEl.firstChild);
+      selectEl.value = '__ambient_auto__';
+      selectedCalendarId = '__ambient_auto__';
+    }
+  } catch (error) {
+    console.error('[Ambient] Failed to load calendars:', error);
+    selectEl.innerHTML = '<option value="">Failed to load calendars</option>';
+  }
+
+  selectEl.addEventListener('change', () => {
+    if (selectEl.value === '__create_new__') {
+      if (newCalForm) newCalForm.style.display = 'flex';
+      if (newCalNameInput) { newCalNameInput.value = ''; newCalNameInput.focus(); }
+    } else {
+      if (newCalForm) newCalForm.style.display = 'none';
+      selectedCalendarId = selectEl.value;
+      if (selectEl.value !== '__ambient_auto__') {
+        saveSelectedCalendarId(selectEl.value);
+      }
+    }
+  });
+
+  cancelBtn?.addEventListener('click', () => {
+    if (newCalForm) newCalForm.style.display = 'none';
+    if (selectedCalendarId) {
+      selectEl.value = selectedCalendarId;
+    } else if (selectEl.options.length > 1) {
+      selectEl.selectedIndex = 0;
+      selectedCalendarId = selectEl.value;
+    }
+  });
+
+  createBtn?.addEventListener('click', async () => {
+    const name = newCalNameInput?.value.trim();
+    if (!name) return;
+
+    if (createBtn) {
+      (createBtn as HTMLButtonElement).disabled = true;
+      createBtn.textContent = 'Creating...';
+    }
+
+    try {
+      const newCal = await createCalendar(name);
+      log(`Created new calendar: ${newCal.summary}`);
+
+      const option = document.createElement('option');
+      option.value = newCal.id;
+      option.textContent = newCal.summary;
+      const createNewOption = selectEl.querySelector('option[value="__create_new__"]');
+      selectEl.insertBefore(option, createNewOption);
+
+      selectEl.value = newCal.id;
+      selectedCalendarId = newCal.id;
+      saveSelectedCalendarId(newCal.id);
+      if (newCalForm) newCalForm.style.display = 'none';
+    } catch (error) {
+      log(`Error creating calendar: ${(error as Error).message}`);
+    } finally {
+      if (createBtn) {
+        (createBtn as HTMLButtonElement).disabled = false;
+        createBtn.textContent = 'Create';
+      }
+    }
+  });
+}
+
+/**
+ * Set up the import view's calendar picker with inline create form
+ * and disabled add-button logic until a calendar is selected.
+ */
+async function setupImportCalendarPicker() {
+  const selectEl = document.getElementById('calendar-select') as HTMLSelectElement | null;
+  const newCalForm = document.getElementById('new-calendar-form');
+  const newCalNameInput = document.getElementById('new-calendar-name') as HTMLInputElement | null;
+  const createBtn = document.getElementById('create-calendar-btn');
+  const cancelBtn = document.getElementById('cancel-new-calendar-btn');
+
+  if (!selectEl) return;
+
+  // Load persisted calendar selection
+  const persistedId = await getSelectedCalendarId();
+  if (persistedId && !selectedCalendarId) {
+    selectedCalendarId = persistedId;
+  }
+
+  setImportAddButtonsEnabled(false);
+
+  try {
+    const calendars = await listCalendars();
+    const writableCalendars = calendars.filter(c => c.accessRole === 'owner' || c.accessRole === 'writer');
+    const ambientCal = writableCalendars.find(c => c.summary.toLowerCase() === 'ambient');
+
+    selectEl.innerHTML = '';
+
+    writableCalendars.forEach(cal => {
+      const option = document.createElement('option');
+      option.value = cal.id;
+      option.textContent = cal.summary + (cal.primary ? ' (primary)' : '');
+      selectEl.appendChild(option);
+    });
+
+    const createOption = document.createElement('option');
+    createOption.value = '__create_new__';
+    createOption.textContent = '+ Create new calendar...';
+    selectEl.appendChild(createOption);
+
+    if (selectedCalendarId && selectedCalendarId !== '__ambient_auto__' && writableCalendars.some(c => c.id === selectedCalendarId)) {
+      selectEl.value = selectedCalendarId;
+      setImportAddButtonsEnabled(true);
+    } else if (ambientCal) {
+      selectEl.value = ambientCal.id;
+      selectedCalendarId = ambientCal.id;
+      saveSelectedCalendarId(ambientCal.id);
+      setImportAddButtonsEnabled(true);
+    } else {
+      const ambientPlaceholder = document.createElement('option');
+      ambientPlaceholder.value = '__ambient_auto__';
+      ambientPlaceholder.textContent = 'Ambient';
+      selectEl.insertBefore(ambientPlaceholder, selectEl.firstChild);
+      selectEl.value = '__ambient_auto__';
+      selectedCalendarId = '__ambient_auto__';
+      setImportAddButtonsEnabled(true);
+    }
+  } catch (error) {
+    console.error('[Ambient] Failed to load calendars:', error);
+    selectEl.innerHTML = '<option value="" disabled selected>Failed to load calendars</option>';
+  }
+
+  selectEl.addEventListener('change', () => {
+    if (selectEl.value === '__create_new__') {
+      if (newCalForm) newCalForm.style.display = 'flex';
+      if (newCalNameInput) { newCalNameInput.value = ''; newCalNameInput.focus(); }
+    } else {
+      if (newCalForm) newCalForm.style.display = 'none';
+      selectedCalendarId = selectEl.value;
+      if (selectEl.value !== '__ambient_auto__') {
+        saveSelectedCalendarId(selectEl.value);
+      }
+      setImportAddButtonsEnabled(true);
+    }
+  });
+
+  cancelBtn?.addEventListener('click', () => {
+    if (newCalForm) newCalForm.style.display = 'none';
+    if (selectedCalendarId) {
+      selectEl.value = selectedCalendarId;
+    } else {
+      selectEl.selectedIndex = 0;
+    }
+  });
+
+  createBtn?.addEventListener('click', async () => {
+    const name = newCalNameInput?.value.trim();
+    if (!name) return;
+
+    if (createBtn) {
+      (createBtn as HTMLButtonElement).disabled = true;
+      createBtn.textContent = 'Creating...';
+    }
+
+    try {
+      const newCal = await createCalendar(name);
+      log(`Created new calendar: ${newCal.summary}`);
+
+      const option = document.createElement('option');
+      option.value = newCal.id;
+      option.textContent = newCal.summary;
+      const createNewOption = selectEl.querySelector('option[value="__create_new__"]');
+      selectEl.insertBefore(option, createNewOption);
+
+      // Remove the __ambient_auto__ placeholder if present
+      const autoOpt = selectEl.querySelector('option[value="__ambient_auto__"]');
+      if (autoOpt) autoOpt.remove();
+
+      selectEl.value = newCal.id;
+      selectedCalendarId = newCal.id;
+      saveSelectedCalendarId(newCal.id);
+      if (newCalForm) newCalForm.style.display = 'none';
+      setImportAddButtonsEnabled(true);
+    } catch (error) {
+      log(`Error creating calendar: ${(error as Error).message}`);
+    } finally {
+      if (createBtn) {
+        (createBtn as HTMLButtonElement).disabled = false;
+        createBtn.textContent = 'Create';
+      }
+    }
+  });
+
+  document.querySelectorAll('.action-btn.add-btn, .add-all-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      if ((btn as HTMLButtonElement).disabled) {
+        e.stopPropagation();
+        e.preventDefault();
+        selectEl.focus();
+        selectEl.showPicker?.();
+      }
+    }, true);
+  });
+}
+
+/**
+ * Enable or disable all add/add-all buttons in the import view.
+ */
+function setImportAddButtonsEnabled(enabled: boolean) {
+  document.querySelectorAll('.action-btn.add-btn').forEach(btn => {
+    (btn as HTMLButtonElement).disabled = !enabled;
+    btn.classList.toggle('btn-disabled-cal', !enabled);
+  });
+  document.querySelectorAll('.add-all-btn').forEach(btn => {
+    (btn as HTMLButtonElement).disabled = !enabled;
+    btn.classList.toggle('btn-disabled-cal', !enabled);
+  });
+}
+
+/**
+ * Get the calendar ID to use for adding events.
+ * If "__ambient_auto__" is selected, auto-creates the Ambient calendar first,
+ * then updates the dropdown and persists the real ID.
+ */
+async function getTargetCalendarId(): Promise<string> {
+  if (selectedCalendarId === '__ambient_auto__') {
+    const realId = await getOrCreateAmbientCalendar();
+    selectedCalendarId = realId;
+    saveSelectedCalendarId(realId);
+
+    // Update dropdown to show real calendar
+    const selectEl = document.getElementById('calendar-select') as HTMLSelectElement | null;
+    if (selectEl) {
+      const autoOpt = selectEl.querySelector('option[value="__ambient_auto__"]');
+      if (autoOpt) autoOpt.remove();
+      const exists = Array.from(selectEl.options).some(o => o.value === realId);
+      if (!exists) {
+        const opt = document.createElement('option');
+        opt.value = realId;
+        opt.textContent = 'Ambient';
+        selectEl.insertBefore(opt, selectEl.firstChild);
+      }
+      selectEl.value = realId;
+    }
+    return realId;
+  }
+  if (selectedCalendarId) {
+    return selectedCalendarId;
+  }
+  return getOrCreateAmbientCalendar();
 }
 
 /**
@@ -2876,13 +4154,11 @@ async function handleAddToCalendar(match: MatchResult, btn: HTMLButtonElement) {
   log(`Event data: summary="${newEvent.summary}", start=${JSON.stringify(newEvent.start)}`);
 
   try {
-    // Get or create the ambient calendar
-    console.log('[Ambient] Getting or creating ambient calendar...');
-    const ambientCalendarId = await getOrCreateAmbientCalendar();
-    console.log('[Ambient] Using ambient calendar:', ambientCalendarId);
+    const targetCalendarId = await getTargetCalendarId();
+    console.log('[Ambient] Using target calendar:', targetCalendarId);
     
     console.log('[Ambient] Calling createEvent...');
-    const createdEvent = await createEvent(newEvent, ambientCalendarId);
+    const createdEvent = await createEvent(newEvent, targetCalendarId);
     console.log('[Ambient] createEvent returned:', createdEvent);
     log(`Event created successfully: ${createdEvent.summary}`);
     
@@ -3015,7 +4291,8 @@ function handleSkipMatch(btn: HTMLButtonElement) {
 }
 
 /**
- * Handle "Add All to Calendar" or "Update All" button click
+ * Handle "Add All" or "Update All" button click.
+ * When filters are active, only processes visible (non-hidden) cards.
  */
 async function handleAddAllToCalendar(event: Event) {
   const btn = event.target as HTMLButtonElement;
@@ -3027,11 +4304,22 @@ async function handleAddAllToCalendar(event: Event) {
   }
   
   // Get all matches of this type
-  const matchesToProcess = lastMatchResults.filter(m => m.match_type === matchType);
+  const allMatchesOfType = lastMatchResults.filter(m => m.match_type === matchType);
   
-  if (matchesToProcess.length === 0) {
+  if (allMatchesOfType.length === 0) {
     log('No events to process');
     return;
+  }
+
+  // Build set of visible indices when filters are active
+  const hasActiveFilters = activeFilterIds.size > 0;
+  const visibleIndices = new Set<number>();
+  if (hasActiveFilters) {
+    for (const cat of filterCategories) {
+      if (activeFilterIds.has(cat.id)) {
+        for (const idx of cat.eventIndices) visibleIndices.add(idx);
+      }
+    }
   }
   
   // Disable the button and show progress
@@ -3042,12 +4330,20 @@ async function handleAddAllToCalendar(event: Event) {
   
   let successCount = 0;
   let errorCount = 0;
+  let skippedByFilter = 0;
   
-  log(`Processing ${matchesToProcess.length} events...`);
+  log(`Processing ${allMatchesOfType.length} events...`);
   
-  for (let idx = 0; idx < matchesToProcess.length; idx++) {
-    const match = matchesToProcess[idx];
+  for (let idx = 0; idx < allMatchesOfType.length; idx++) {
+    const match = allMatchesOfType[idx];
     const cardId = `${matchType}_${idx}`;
+
+    // Skip if hidden by active filter
+    if (hasActiveFilters && !visibleIndices.has(idx)) {
+      skippedByFilter++;
+      continue;
+    }
+
     const card = document.querySelector(`.match-card[data-card-id="${cardId}"]`);
     
     // Skip if already processed (check if action buttons are gone)
@@ -3055,23 +4351,19 @@ async function handleAddAllToCalendar(event: Event) {
       const actionsDiv = card.querySelector('.match-actions');
       const hasActionBtn = actionsDiv?.querySelector('.action-btn:not(:disabled)');
       if (!hasActionBtn) {
-        // Already processed
         continue;
       }
     }
     
     try {
       if (matchType === 'no_match') {
-        // Add new event
         await addEventToCalendarBulk(match, cardId);
         successCount++;
       } else if (matchType === 'certain_update') {
-        // Update existing event
         await updateEventInCalendarBulk(match, cardId);
         successCount++;
       }
       
-      // Update the card UI to show success
       if (card) {
         const actionsDiv = card.querySelector('.match-actions');
         if (actionsDiv) {
@@ -3084,7 +4376,6 @@ async function handleAddAllToCalendar(event: Event) {
       errorCount++;
       log(`Error processing event ${idx + 1}: ${(error as Error).message}`);
       
-      // Show error on the card
       if (card) {
         const actionsDiv = card.querySelector('.match-actions');
         if (actionsDiv) {
@@ -3109,7 +4400,8 @@ async function handleAddAllToCalendar(event: Event) {
     btn.disabled = false;
   }
   
-  log(`Bulk operation complete: ${successCount} succeeded, ${errorCount} failed`);
+  const filterNote = skippedByFilter > 0 ? ` (${skippedByFilter} filtered out)` : '';
+  log(`Bulk operation complete: ${successCount} succeeded, ${errorCount} failed${filterNote}`);
 }
 
 /**
@@ -3130,11 +4422,10 @@ async function addEventToCalendarBulk(match: MatchResult, cardId: string): Promi
     end: editedData?.end ?? event.end ?? event.start,
   };
   
-  // Get or create the ambient calendar
-  const ambientCalendarId = await getOrCreateAmbientCalendar();
+  const targetCalendarId = await getTargetCalendarId();
   
   // Create the event
-  await createEvent(newEvent, ambientCalendarId);
+  await createEvent(newEvent, targetCalendarId);
   
   // Clean up edited data
   editedEvents.delete(cardId);
@@ -3343,8 +4634,8 @@ async function handleDebugDomInfo() {
       throw new Error('No active tab found');
     }
     
-    if (!tab.url?.includes('messages.google.com')) {
-      throw new Error('Please open a Google Messages page first');
+    if (!isSupportedPlatformUrl(tab.url)) {
+      throw new Error('Please open a supported page first. Supported platforms:\n• messages.google.com\n• www.messenger.com');
     }
 
     // Request DOM debug info from content script
@@ -3379,8 +4670,8 @@ async function handleDebugGetConversation() {
       throw new Error('No active tab found');
     }
     
-    if (!tab.url?.includes('messages.google.com')) {
-      throw new Error('Please open a Google Messages conversation first');
+    if (!isSupportedPlatformUrl(tab.url)) {
+      throw new Error('Please open a supported page first. Supported platforms:\n• messages.google.com\n• www.messenger.com');
     }
 
     // Check if we're on a conversation page
@@ -3695,8 +4986,6 @@ async function handleImportExtractClick() {
     if (importResultsEl) {
       importResultsEl.innerHTML = '<p class="placeholder"><span class="btn-spinner"></span> Extracting events from file...</p>';
     }
-    if (importMatchedSection) importMatchedSection.style.display = 'none';
-
     if (importExtractBtn) importExtractBtn.disabled = true;
     updateImportStatus('extracting');
     importLog(`Reading file: ${selectedFile.name} (${(selectedFile.size / 1024).toFixed(1)} KB)`);
@@ -3749,15 +5038,8 @@ async function handleImportExtractClick() {
     importLog(`AI found ${events.length} event(s) in file`);
 
     displayImportedEvents(events);
-
-    const calendarConnected = await isCalendarConnected();
-    if (!calendarConnected) {
-      importLog('Calendar not connected - skipping calendar matching');
-      updateImportStatus('complete');
-      return;
-    }
-
-    await handleImportCalendarMatching(events, apiKey);
+    updateImportStatus('complete');
+    importLog('Import complete!');
 
   } catch (error) {
     updateImportStatus('error');
@@ -3775,89 +5057,905 @@ async function handleImportExtractClick() {
 function displayImportedEvents(events: ExtractedEvent[]) {
   if (!importResultsEl) return;
 
+  const importSection = document.getElementById('import-results-section');
+
   const actionableEvents = events.filter(e => e.event_type !== 'not_an_event');
 
   if (actionableEvents.length === 0) {
+    if (importSection) importSection.style.display = 'block';
     importResultsEl.innerHTML = '<p class="placeholder">No events found in the uploaded file.</p>';
     return;
   }
 
-  importResultsEl.innerHTML = `
-    <div class="events-list">
-      <p class="events-header">Found ${actionableEvents.length} event(s) in file:</p>
-      ${actionableEvents.map(event => renderEventCard(event, false)).join('')}
-    </div>
-  `;
-}
+  // Convert extracted events to no_match MatchResults so we can reuse
+  // the match card UI with calendar picker and add-to-calendar buttons
+  const asMatchResults: MatchResult[] = actionableEvents.map(event => ({
+    extracted_event: event,
+    match_type: 'no_match' as const,
+    match_data: {
+      match_type: 'no_match' as const,
+      matched_event: null,
+      matched_event_id: null,
+    },
+  }));
+  lastMatchResults = asMatchResults;
 
-async function handleImportCalendarMatching(events: ExtractedEvent[], apiKey: string | null) {
-  try {
-    const processableEvents = events.filter(
-      e => e.event_type === 'full_potential_event_details' ||
-           e.event_type === 'incomplete_event_details'
-    );
-
-    if (processableEvents.length === 0) {
-      importLog('No processable events to match');
-      updateImportStatus('complete');
-      return;
-    }
-
-    if (importMatchedSection) importMatchedSection.style.display = 'block';
-    if (importMatchedResultsEl) {
-      importMatchedResultsEl.innerHTML = '<p class="placeholder"><span class="btn-spinner"></span> Matching against your calendar...</p>';
-    }
-
-    updateImportStatus('fetching_calendar');
-    importLog('Fetching calendar events for matching...');
-
-    const dateRange = getDateRangeFromEvents(processableEvents);
-    const calendarEvents = await getEventsFromAllCalendars(dateRange.timeMin, dateRange.timeMax);
-    importLog(`Fetched ${calendarEvents.length} calendar events for comparison`);
-
-    updateImportStatus('matching');
-    const aiProvider = await getAIProvider();
-    const providerName = aiProvider === 'ambient_ai' ? 'AmbientAI' : 'Gemini';
-    importLog(`Matching events with ${providerName}...`);
-
-    const matchResult = await chrome.runtime.sendMessage({
-      type: 'MATCH_EVENTS',
-      extractedEvents: processableEvents,
-      calendarEvents,
-      apiKey: apiKey || '',
-      provider: aiProvider,
-    });
-
-    if (!matchResult.success) {
-      throw new Error(matchResult.error);
-    }
-
-    const matches: MatchResult[] = matchResult.matches;
-    lastMatchResults = matches;
-
-    importLog(`Matching complete: ${matches.length} result(s)`);
-    displayImportMatchResults(matches);
-    updateImportStatus('complete');
-    importLog('Import complete!');
-
-  } catch (error) {
-    updateImportStatus('error');
-    const errorMsg = (error as Error).message;
-    showImportErrorBanner(`Matching failed: ${errorMsg}`);
-    importLog(`Matching error: ${errorMsg}`);
+  if (importSection) {
+    importSection.style.display = 'block';
+    // Hide the section header — import view renders its own via displayMatchResults
+    const h2 = importSection.querySelector('h2');
+    if (h2) h2.style.display = 'none';
   }
-}
 
-function displayImportMatchResults(matches: MatchResult[]) {
-  // Reuse the same rendering as the main view but target the import containers
+  // Temporarily swap the target container to render in the import view
   const origMatchedResults = matchedResultsEl;
   const origMatchedSection = matchedSection;
+  matchedResultsEl = importResultsEl;
+  matchedSection = importSection;
 
-  matchedResultsEl = importMatchedResultsEl;
-  matchedSection = importMatchedSection;
-
-  displayMatchResults(matches);
+  displayMatchResults(asMatchResults, true);
 
   matchedResultsEl = origMatchedResults;
   matchedSection = origMatchedSection;
+
+  // Auto-categorize when > 20 events
+  if (actionableEvents.length > 20) {
+    triggerAutoCategorization('import');
+  }
 }
+
+// ============ Calendar Agent Handlers ============
+
+/**
+ * Listen for progress updates from the background script.
+ */
+chrome.runtime.onMessage.addListener((message) => {
+  if (message.type === 'CALENDAR_AGENT_PROGRESS') {
+    updateAgentProgress(message.progress);
+  }
+});
+
+async function handleAgentStart(): Promise<void> {
+  if (agentRunning) return;
+
+  agentRunning = true;
+  if (agentStartBtn) agentStartBtn.style.display = 'none';
+  if (agentStopBtn) agentStopBtn.style.display = 'block';
+  if (agentProgressSection) agentProgressSection.style.display = 'block';
+  if (agentResultsSection) agentResultsSection.style.display = 'none';
+  if (agentPlanStepsEl) agentPlanStepsEl.innerHTML = '';
+  if (agentUnknownPlatformNotice) agentUnknownPlatformNotice.style.display = 'none';
+  agentPageUrl = null;
+  agentPageUrlSubmitted = false;
+  if (agentStatusEl) {
+    agentStatusEl.textContent = 'Running...';
+    agentStatusEl.className = 'status status-extracting';
+  }
+
+  try {
+    // Request host permission for the active tab's origin (requires user gesture)
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    console.log('[CA:sidepanel] Active tab:', activeTab?.id, activeTab?.url);
+    if (activeTab?.url && (activeTab.url.startsWith('http://') || activeTab.url.startsWith('https://'))) {
+      const origin = new URL(activeTab.url).origin + '/*';
+      const hasPermission = await chrome.permissions.contains({ origins: [origin] });
+      console.log(`[CA:sidepanel] Permission for ${origin}: ${hasPermission}`);
+      if (!hasPermission) {
+        console.log(`[CA:sidepanel] Requesting permission for ${origin}...`);
+        const granted = await chrome.permissions.request({ origins: [origin] });
+        console.log(`[CA:sidepanel] Permission granted: ${granted}`);
+        if (!granted) {
+          throw new Error('Permission to access this site was denied. The calendar agent needs access to read the page content.');
+        }
+      }
+    } else {
+      console.log('[CA:sidepanel] No valid URL on active tab, skipping permission request');
+    }
+
+    const provider = await getAIProvider();
+    const apiKey = provider === 'gemini_key' ? await getGeminiKey() : undefined;
+
+    const response = await chrome.runtime.sendMessage({
+      type: 'START_CALENDAR_AGENT',
+      apiKey: apiKey || undefined,
+      provider,
+    });
+
+    agentRunning = false;
+
+    if (response.success && response.events) {
+      const events: ExtractedEvent[] = response.events;
+      if (events.length === 0) {
+        if (agentStatusEl) {
+          agentStatusEl.textContent = 'No events found';
+          agentStatusEl.className = 'status status-idle';
+        }
+        showAgentError('No calendar events were found on this page. Try navigating to a page with a calendar or event listing.');
+      } else {
+        if (agentStatusEl) {
+          agentStatusEl.textContent = 'Matching against your calendar...';
+          agentStatusEl.className = 'status status-extracting';
+        }
+        await displayAgentResults(events);
+        if (agentStatusEl) {
+          agentStatusEl.textContent = `Complete — ${events.length} events found`;
+          agentStatusEl.className = 'status status-complete';
+        }
+      }
+    } else {
+      const rawError = response.error || 'Agent finished with errors';
+      const friendlyMsg = mapAgentErrorToFriendly(rawError);
+      if (agentStatusEl) {
+        agentStatusEl.textContent = 'Extraction failed';
+        agentStatusEl.className = 'status status-error';
+      }
+      showAgentError(friendlyMsg);
+    }
+  } catch (e) {
+    agentRunning = false;
+    const rawError = (e as Error).message;
+    const friendlyMsg = mapAgentErrorToFriendly(rawError);
+    if (agentStatusEl) {
+      agentStatusEl.textContent = 'Extraction failed';
+      agentStatusEl.className = 'status status-error';
+    }
+    showAgentError(friendlyMsg);
+  }
+
+  if (agentStartBtn) {
+    agentStartBtn.style.display = 'block';
+    agentStartBtn.textContent = 'Extract Again';
+  }
+  if (agentStopBtn) agentStopBtn.style.display = 'none';
+  const instrEl = document.getElementById('agent-instruction');
+  if (instrEl) instrEl.style.display = 'block';
+}
+
+function showAgentError(message: string): void {
+  const banner = document.getElementById('agent-error-banner');
+  const msgEl = document.getElementById('agent-error-message');
+  if (banner && msgEl) {
+    msgEl.textContent = message;
+    banner.classList.add('visible');
+  }
+}
+
+function mapAgentErrorToFriendly(error: string): string {
+  const lower = error.toLowerCase();
+  if (lower.includes('permission') && (lower.includes('denied') || lower.includes('was denied'))) {
+    return 'This page requires permission to access. Please try again and grant access when prompted.';
+  }
+  if (lower.includes('not fully loaded') || lower.includes('not.*loaded') || lower.includes('no tab')) {
+    return 'The page doesn\'t appear to be fully loaded. Please wait for it to load and try again.';
+  }
+  if (lower.includes('inject') || lower.includes('cannot access') || lower.includes('chrome://') || lower.includes('chrome-extension://')) {
+    return 'This page can\'t be accessed by the extension. Try navigating to a regular webpage with calendar events.';
+  }
+  if (lower.includes('timeout')) {
+    return 'The extraction timed out. The page may be too complex. Try a different page or use the Import option.';
+  }
+  return error;
+}
+
+function handleAgentStop(): void {
+  chrome.runtime.sendMessage({ type: 'STOP_CALENDAR_AGENT' });
+  agentRunning = false;
+  if (agentStartBtn) agentStartBtn.style.display = 'block';
+  if (agentStopBtn) agentStopBtn.style.display = 'none';
+  if (agentStatusEl) {
+    agentStatusEl.textContent = 'Stopped by user';
+    agentStatusEl.className = 'status status-idle';
+  }
+}
+
+async function handleSubmitPageUrl(e: Event): Promise<void> {
+  e.preventDefault();
+
+  const link = document.getElementById('agent-submit-url-link');
+  if (!agentPageUrl || agentPageUrlSubmitted) return;
+
+  if (link) link.textContent = 'Sending...';
+
+  try {
+    const token = await getCalendarToken();
+    const response = await fetch('https://tryambientai.com/extension_endpoint/submit_page_url/', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        url: agentPageUrl,
+        page_title: document.title || '',
+      }),
+    });
+
+    if (response.ok) {
+      agentPageUrlSubmitted = true;
+      if (link) {
+        const parent = link.parentElement;
+        if (parent) {
+          parent.innerHTML = 'URL sent — thanks! We\'ll use this to improve extraction for this site.';
+        }
+      }
+    } else {
+      if (link) link.textContent = 'send this page\'s URL to Ambient';
+    }
+  } catch {
+    if (link) link.textContent = 'send this page\'s URL to Ambient';
+  }
+}
+
+// ============ Filter Handlers ============
+
+async function handleFilterClick(): Promise<void> {
+  const filterBtn = document.getElementById('agent-filter-btn') as HTMLButtonElement | null;
+  const dropdown = document.getElementById('agent-filter-dropdown');
+  if (!filterBtn || !dropdown) return;
+
+  // If categories already loaded, toggle dropdown visibility
+  if (filterCategories.length > 0) {
+    const isVisible = dropdown.style.display !== 'none';
+    if (isVisible) {
+      dropdown.style.display = 'none';
+      filterBtn.classList.remove('active');
+    } else {
+      dropdown.style.display = 'flex';
+      filterBtn.classList.add('active');
+    }
+    return;
+  }
+
+  // First time: call LLM to categorize
+  if (filterEventsSource.length === 0) return;
+
+  filterBtn.disabled = true;
+  filterBtn.classList.add('loading');
+  filterBtn.innerHTML = `<span class="btn-spinner"></span> Categorizing...`;
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'CATEGORIZE_EVENTS',
+      events: filterEventsSource,
+    });
+
+    if (!response.success) {
+      throw new Error(response.error || 'Categorization failed');
+    }
+
+    filterCategories = response.categories as EventCategory[];
+    activeFilterIds.clear();
+
+    renderFilterDropdown(dropdown);
+    dropdown.style.display = 'flex';
+    filterBtn.classList.add('active');
+    filterBtn.classList.remove('loading');
+    filterBtn.disabled = false;
+    filterBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg> Filter`;
+
+    // Apply color dots to cards
+    applyFilterColorsToCards();
+  } catch (e) {
+    console.error('[Ambient] Categorization error:', e);
+    filterBtn.disabled = false;
+    filterBtn.classList.remove('loading');
+    filterBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg> Filter`;
+  }
+}
+
+const FIXED_PRIORITY_LABELS = [
+  'days off / early dismissal',
+  'first & last days',
+  'parent attendance expected',
+];
+
+function isPriorityCategory(label: string): boolean {
+  const lower = label.toLowerCase();
+  if (lower.startsWith('school:')) return true;
+  return FIXED_PRIORITY_LABELS.some(p => lower.includes(p.split('/')[0].trim().slice(0, 8)));
+}
+
+function renderCategoryRow(cat: { id: string; label: string; color: string; eventIndices: number[] }): string {
+  const isSelected = activeFilterIds.has(cat.id);
+  const count = cat.eventIndices.length;
+  const dimmed = count === 0 ? ' filter-category-empty' : '';
+  return `<div class="filter-category ${isSelected ? 'selected' : ''}${dimmed}" data-cat-id="${cat.id}">
+    <span class="filter-category-check" style="background: ${isSelected ? cat.color : 'transparent'}; border-color: ${isSelected ? 'transparent' : ''}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+    </span>
+    <span class="filter-category-swatch" style="background: ${cat.color}"></span>
+    <span class="filter-category-label">${escapeHtml(cat.label)}</span>
+    <span class="filter-category-count">${count}</span>
+  </div>`;
+}
+
+function renderFilterDropdown(container: HTMLElement): void {
+  const FIXED_PRIORITY_COLORS = ['#e53e3e', '#7877c6', '#ed8936'];
+  const SCHOOL_COLOR = '#38a169';
+
+  const priorityCats: Array<{ id: string; label: string; color: string; eventIndices: number[] }> = [];
+  const schoolCats: typeof priorityCats = [];
+  const otherCats: typeof priorityCats = [];
+
+  for (const cat of filterCategories) {
+    const lower = cat.label.toLowerCase();
+    if (lower.startsWith('school:')) {
+      schoolCats.push(cat);
+    } else if (FIXED_PRIORITY_LABELS.some(p => lower.includes(p.split('/')[0].trim().slice(0, 8)))) {
+      priorityCats.push(cat);
+    } else {
+      otherCats.push(cat);
+    }
+  }
+
+  // Ensure the 3 fixed priority categories always exist
+  const defaultPriorityLabels = ['Days Off / Early Dismissal', 'First & Last Days', 'Parent Attendance Expected'];
+  for (let i = 0; i < defaultPriorityLabels.length; i++) {
+    const label = defaultPriorityLabels[i];
+    const prefix = FIXED_PRIORITY_LABELS[i].split('/')[0].trim().slice(0, 8);
+    const exists = priorityCats.some(c => c.label.toLowerCase().includes(prefix));
+    if (!exists) {
+      priorityCats.splice(i, 0, {
+        id: `priority_stub_${i}`,
+        label,
+        color: FIXED_PRIORITY_COLORS[i],
+        eventIndices: [],
+      });
+    }
+  }
+
+  // Sort fixed priorities to match the default order
+  priorityCats.sort((a, b) => {
+    const aIdx = defaultPriorityLabels.findIndex(l => a.label.toLowerCase().includes(l.toLowerCase().slice(0, 8)));
+    const bIdx = defaultPriorityLabels.findIndex(l => b.label.toLowerCase().includes(l.toLowerCase().slice(0, 8)));
+    return (aIdx === -1 ? 99 : aIdx) - (bIdx === -1 ? 99 : bIdx);
+  });
+
+  // Assign green shades to school categories if they don't have a good color yet
+  schoolCats.forEach((cat, i) => {
+    const greens = ['#38a169', '#2f855a', '#276749', '#48bb78'];
+    cat.color = greens[i % greens.length];
+  });
+
+  let html = '<div class="filter-dropdown-body">';
+  for (const cat of priorityCats) html += renderCategoryRow(cat);
+  if (schoolCats.length > 0) {
+    html += '<div class="filter-divider"></div>';
+    for (const cat of schoolCats) html += renderCategoryRow(cat);
+  }
+  if (otherCats.length > 0) {
+    html += '<div class="filter-divider"></div>';
+    for (const cat of otherCats) html += renderCategoryRow(cat);
+  }
+  html += '</div>';
+
+  html += `<div class="filter-actions">
+    <button class="filter-action-btn" data-action="select-all">Select All</button>
+    <button class="filter-action-btn" data-action="clear-all">Clear All</button>
+    <button class="filter-action-btn filter-apply-btn" data-action="apply">Apply</button>
+  </div>`;
+  container.innerHTML = html;
+
+  // Category click handlers
+  container.querySelectorAll('.filter-category').forEach(el => {
+    el.addEventListener('click', () => {
+      const catId = (el as HTMLElement).dataset.catId;
+      if (!catId) return;
+      if (activeFilterIds.has(catId)) {
+        activeFilterIds.delete(catId);
+      } else {
+        activeFilterIds.add(catId);
+      }
+      renderFilterDropdown(container);
+      applyActiveFilters();
+    });
+  });
+
+  // Select All / Clear All / Apply
+  container.querySelectorAll('.filter-action-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const action = (btn as HTMLElement).dataset.action;
+      if (action === 'select-all') {
+        filterCategories.forEach(c => activeFilterIds.add(c.id));
+        renderFilterDropdown(container);
+        applyActiveFilters();
+      } else if (action === 'clear-all') {
+        activeFilterIds.clear();
+        renderFilterDropdown(container);
+        applyActiveFilters();
+      } else if (action === 'apply') {
+        container.style.display = 'none';
+        const filterBtn = document.getElementById('agent-filter-btn');
+        if (filterBtn) filterBtn.classList.remove('active');
+      }
+    });
+  });
+}
+
+/**
+ * Auto-trigger categorization for large event sets (>20).
+ * Pre-selects priority categories after completion.
+ */
+async function triggerAutoCategorization(viewPrefix: 'agent' | 'import'): Promise<void> {
+  const filterBtn = document.getElementById(`${viewPrefix}-filter-btn`) as HTMLButtonElement | null;
+  const dropdown = document.getElementById(`${viewPrefix}-filter-dropdown`);
+
+  if (!filterBtn || !dropdown || filterEventsSource.length === 0) return;
+
+  filterBtn.disabled = true;
+  filterBtn.classList.add('loading');
+  filterBtn.innerHTML = `<span class="btn-spinner"></span> Categorizing...`;
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'CATEGORIZE_EVENTS',
+      events: filterEventsSource,
+    });
+
+    if (!response.success) throw new Error(response.error || 'Categorization failed');
+
+    filterCategories = response.categories as EventCategory[];
+    activeFilterIds.clear();
+
+    // Pre-select priority categories
+    for (const cat of filterCategories) {
+      if (isPriorityCategory(cat.label)) {
+        activeFilterIds.add(cat.id);
+      }
+    }
+
+    renderFilterDropdown(dropdown);
+    dropdown.style.display = 'flex';
+    filterBtn.classList.add('active');
+    filterBtn.classList.remove('loading');
+    filterBtn.disabled = false;
+    filterBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg> Filter`;
+
+    applyFilterColorsToCards();
+
+    // Apply filter if priority categories were selected
+    if (activeFilterIds.size > 0) {
+      applyActiveFilters();
+    }
+  } catch (e) {
+    console.error('[Ambient] Auto-categorization error:', e);
+    filterBtn.disabled = false;
+    filterBtn.classList.remove('loading');
+    filterBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg> Filter`;
+  }
+}
+
+function applyFilterColorsToCards(): void {
+  if (!agentResultsList) return;
+
+  // Build index -> categories mapping (an event can belong to multiple)
+  const indexToCategories = new Map<number, EventCategory[]>();
+  for (const cat of filterCategories) {
+    for (const idx of cat.eventIndices) {
+      const list = indexToCategories.get(idx) || [];
+      list.push(cat);
+      indexToCategories.set(idx, list);
+    }
+  }
+
+  const cards = agentResultsList.querySelectorAll('.match-card[data-card-id]');
+  cards.forEach(card => {
+    const cardId = (card as HTMLElement).dataset.cardId;
+    if (!cardId) return;
+    const match = cardId.match(/^no_match_(\d+)$/);
+    if (!match) return;
+    const idx = parseInt(match[1], 10);
+    const cats = indexToCategories.get(idx);
+    if (!cats || cats.length === 0) return;
+
+    // Store all category IDs as comma-separated for filter matching
+    (card as HTMLElement).dataset.filterCatIds = cats.map(c => c.id).join(',');
+
+    const summaryEl = card.querySelector('.match-summary');
+    if (summaryEl && !summaryEl.querySelector('.filter-color-dot')) {
+      // Show a dot for each category (priority categories first)
+      const sorted = [...cats].sort((a, b) => {
+        const aP = isPriorityCategory(a.label) ? 0 : 1;
+        const bP = isPriorityCategory(b.label) ? 0 : 1;
+        return aP - bP;
+      });
+      for (let i = sorted.length - 1; i >= 0; i--) {
+        const dot = document.createElement('span');
+        dot.className = 'filter-color-dot';
+        dot.style.backgroundColor = sorted[i].color;
+        dot.title = sorted[i].label;
+        summaryEl.insertBefore(dot, summaryEl.firstChild);
+      }
+    }
+  });
+}
+
+function applyActiveFilters(): void {
+  if (!agentResultsList) return;
+
+  const hasActiveFilters = activeFilterIds.size > 0;
+
+  // Show/hide cards based on whether any of the card's categories are active
+  const cards = agentResultsList.querySelectorAll('.match-card[data-card-id]');
+  let visibleCount = 0;
+  cards.forEach(card => {
+    const el = card as HTMLElement;
+    const cardId = el.dataset.cardId;
+    if (!cardId) return;
+    const match = cardId.match(/^no_match_(\d+)$/);
+    if (!match) return;
+
+    if (!hasActiveFilters) {
+      el.classList.remove('filter-hidden');
+      visibleCount++;
+      return;
+    }
+
+    const catIds = (el.dataset.filterCatIds || '').split(',').filter(Boolean);
+    const matches = catIds.some(id => activeFilterIds.has(id));
+    if (matches) {
+      el.classList.remove('filter-hidden');
+      visibleCount++;
+    } else {
+      el.classList.add('filter-hidden');
+    }
+  });
+
+  // Update the section header count
+  const sectionHeaders = agentResultsList.querySelectorAll('.match-section-header');
+  sectionHeaders.forEach(header => {
+    const text = header.textContent || '';
+    if (text.startsWith('New Events')) {
+      const total = cards.length;
+      if (hasActiveFilters) {
+        header.textContent = `New Events (${visibleCount} of ${total})`;
+      } else {
+        header.textContent = `New Events (${total})`;
+      }
+    }
+  });
+
+  // Update "Add All" button text
+  const addAllBtns = agentResultsList.querySelectorAll('.add-all-btn');
+  addAllBtns.forEach(btn => {
+    if (hasActiveFilters) {
+      (btn as HTMLButtonElement).textContent = `Add All (${visibleCount})`;
+    } else {
+      (btn as HTMLButtonElement).textContent = 'Add All';
+    }
+  });
+}
+
+function updateAgentProgress(progress: {
+  phase: string;
+  iterationCount: number;
+  maxIterations: number;
+  eventsFound: number;
+  dateRangeCovered: { earliest: string; latest: string } | null;
+  currentAction: string;
+  activityLog: string[];
+  planSteps?: Array<{
+    id: string;
+    label: string;
+    status: string;
+    subSteps: Array<{ message: string; timestamp: string }>;
+    result?: string;
+  }>;
+  unknownPlatformNotice?: boolean;
+  pageUrl?: string;
+}): void {
+  if (agentPhaseEl) agentPhaseEl.textContent = progress.phase;
+  if (agentIterationEl) agentIterationEl.textContent = `${progress.iterationCount} / ${progress.maxIterations}`;
+
+  if (agentEventsCountEl) agentEventsCountEl.textContent = String(progress.eventsFound);
+  if (agentDateRangeEl) {
+    if (progress.dateRangeCovered) {
+      agentDateRangeEl.textContent = `${progress.dateRangeCovered.earliest} — ${progress.dateRangeCovered.latest}`;
+    } else {
+      agentDateRangeEl.textContent = '--';
+    }
+  }
+
+  if (agentUnknownPlatformNotice) {
+    agentUnknownPlatformNotice.style.display = progress.unknownPlatformNotice ? 'block' : 'none';
+  }
+
+  if (progress.pageUrl) {
+    agentPageUrl = progress.pageUrl;
+  }
+
+  if (agentPlanStepsEl && progress.planSteps && progress.planSteps.length > 0) {
+    renderPlanSteps(progress.planSteps);
+  }
+
+  // Update agent activity log
+  const agentLogEl = document.getElementById('agent-log');
+  if (agentLogEl && progress.activityLog && progress.activityLog.length > 0) {
+    agentLogEl.innerHTML = progress.activityLog
+      .map(entry => `<div class="log-entry">${escapeHtml(entry)}</div>`)
+      .join('');
+    agentLogEl.scrollTop = agentLogEl.scrollHeight;
+  }
+}
+
+function renderPlanSteps(steps: Array<{
+  id: string;
+  label: string;
+  status: string;
+  subSteps: Array<{ message: string; timestamp: string }>;
+  result?: string;
+}>): void {
+  if (!agentPlanStepsEl) return;
+
+  const html = steps.map(step => {
+    const statusIcon = getPlanStepIcon(step.status);
+    const statusClass = `plan-step-${step.status}`;
+    const isExpanded = step.status === 'active' || (step.status === 'completed' && step.subSteps.length > 0);
+
+    let stepHtml = `<div class="plan-step ${statusClass}" data-step-id="${step.id}">`;
+    stepHtml += `<div class="plan-step-header">`;
+    stepHtml += `<span class="plan-step-icon">${statusIcon}</span>`;
+    stepHtml += `<span class="plan-step-label">${escapeHtml(step.label)}</span>`;
+    if (step.result && step.status !== 'active') {
+      stepHtml += `<span class="plan-step-result">${escapeHtml(step.result)}</span>`;
+    }
+    stepHtml += `</div>`;
+
+    if (step.subSteps.length > 0) {
+      const subStepsClass = isExpanded ? 'plan-substeps expanded' : 'plan-substeps';
+      stepHtml += `<div class="${subStepsClass}">`;
+      for (const sub of step.subSteps) {
+        stepHtml += `<div class="plan-substep">`;
+        stepHtml += `<span class="plan-substep-time">${escapeHtml(sub.timestamp)}</span>`;
+        stepHtml += `<span class="plan-substep-msg">${escapeHtml(sub.message)}</span>`;
+        stepHtml += `</div>`;
+      }
+      stepHtml += `</div>`;
+    }
+
+    stepHtml += `</div>`;
+    return stepHtml;
+  }).join('');
+
+  agentPlanStepsEl.innerHTML = html;
+
+  // Auto-scroll to the active step
+  const activeStep = agentPlanStepsEl.querySelector('.plan-step-active');
+  if (activeStep) {
+    activeStep.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+}
+
+function getPlanStepIcon(status: string): string {
+  switch (status) {
+    case 'completed': return '<svg class="plan-icon-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+    case 'active': return '<span class="plan-icon-spinner"></span>';
+    case 'failed': return '<svg class="plan-icon-x" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
+    case 'skipped': return '<svg class="plan-icon-skip" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line></svg>';
+    default: return '<span class="plan-icon-circle"></span>';
+  }
+}
+
+/**
+ * Deterministic calendar matching — no LLM calls.
+ * Compares extracted events against Google Calendar using normalized
+ * summary comparison and start-time tolerance.
+ */
+async function deterministicMatchEvents(
+  extractedEvents: ExtractedEvent[]
+): Promise<MatchResult[]> {
+  const futureEvents = extractedEvents.filter(e => {
+    const dt = e.start?.dateTime || e.start?.date;
+    if (!dt) return true;
+    return new Date(dt) >= new Date(new Date().toDateString());
+  });
+
+  if (futureEvents.length === 0) {
+    return extractedEvents.map(e => ({
+      extracted_event: e,
+      match_type: 'no_match' as const,
+      match_data: { match_type: 'no_match' as const, matched_event: null, matched_event_id: null },
+    }));
+  }
+
+  const dates = futureEvents
+    .map(e => e.start?.dateTime || e.start?.date || '')
+    .filter(Boolean)
+    .sort();
+
+  const timeMin = dates.length > 0 ? new Date(dates[0]).toISOString() : new Date().toISOString();
+  const lastDate = dates.length > 0 ? new Date(dates[dates.length - 1]) : new Date();
+  lastDate.setMonth(lastDate.getMonth() + 1);
+  const timeMax = lastDate.toISOString();
+
+  let calendarEvents: CalendarEvent[] = [];
+  try {
+    calendarEvents = await getEventsFromAllCalendars(timeMin, timeMax);
+  } catch (e) {
+    console.warn('[Ambient] Failed to fetch calendar events for matching:', e);
+  }
+
+  if (calendarEvents.length === 0) {
+    return extractedEvents.map(e => ({
+      extracted_event: e,
+      match_type: 'no_match' as const,
+      match_data: { match_type: 'no_match' as const, matched_event: null, matched_event_id: null },
+    }));
+  }
+
+  return extractedEvents.map(extracted => {
+    const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const extractedNorm = norm(extracted.summary || '');
+    const extractedStart = extracted.start?.dateTime || extracted.start?.date || '';
+
+    let bestMatch: CalendarEvent | null = null;
+    let bestType: 'no_match' | 'no_update' | 'possible_update' = 'no_match';
+
+    for (const cal of calendarEvents) {
+      const calNorm = norm(cal.summary || '');
+      const calStart = cal.start?.dateTime || cal.start?.date || '';
+
+      if (!calStart || !extractedStart) continue;
+
+      const timesMatch = startTimesMatch(extractedStart, calStart);
+      if (!timesMatch) continue;
+
+      if (extractedNorm === calNorm) {
+        bestMatch = cal;
+        bestType = 'no_update';
+        break;
+      }
+
+      const dist = levenshtein(extractedNorm, calNorm);
+      const maxLen = Math.max(extractedNorm.length, calNorm.length);
+      if (maxLen > 0 && dist / maxLen <= 0.2) {
+        bestMatch = cal;
+        bestType = 'possible_update';
+      }
+    }
+
+    if (bestMatch && bestType !== 'no_match') {
+      const result: MatchResult = {
+        extracted_event: extracted,
+        match_type: bestType,
+        match_data: {
+          match_type: bestType,
+          matched_event: bestMatch.summary || null,
+          matched_event_id: bestMatch.id || null,
+        },
+        matched_calendar_event: bestMatch,
+      };
+      if (bestType === 'possible_update') {
+        result.field_differences = buildFieldDifferences(extracted, bestMatch);
+      }
+      return result;
+    }
+
+    return {
+      extracted_event: extracted,
+      match_type: 'no_match' as const,
+      match_data: { match_type: 'no_match' as const, matched_event: null, matched_event_id: null },
+    };
+  });
+}
+
+function startTimesMatch(a: string, b: string): boolean {
+  if (a.length <= 10 && b.length <= 10) return a === b;
+  try {
+    const da = new Date(a);
+    const db = new Date(b);
+    if (a.length <= 10 || b.length <= 10) {
+      return da.toISOString().slice(0, 10) === db.toISOString().slice(0, 10);
+    }
+    return Math.abs(da.getTime() - db.getTime()) <= 60_000;
+  } catch {
+    return a === b;
+  }
+}
+
+function levenshtein(a: string, b: string): number {
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+  const matrix: number[][] = [];
+  for (let i = 0; i <= b.length; i++) matrix[i] = [i];
+  for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      const cost = b[i - 1] === a[j - 1] ? 0 : 1;
+      matrix[i][j] = Math.min(
+        matrix[i - 1][j] + 1,
+        matrix[i][j - 1] + 1,
+        matrix[i - 1][j - 1] + cost
+      );
+    }
+  }
+  return matrix[b.length][a.length];
+}
+
+function buildFieldDifferences(extracted: ExtractedEvent, calendar: CalendarEvent): FieldDifferences {
+  const diff: FieldDifferences = {};
+  if (extracted.summary && calendar.summary && extracted.summary !== calendar.summary) {
+    diff.summary = { old: calendar.summary, new: extracted.summary };
+  }
+  if (extracted.location && calendar.location && extracted.location !== calendar.location) {
+    diff.location = { old: calendar.location, new: extracted.location };
+  }
+  return diff;
+}
+
+async function displayAgentResults(events: ExtractedEvent[]): Promise<void> {
+  if (!agentResultsList || !agentResultsSection) return;
+
+  const actionableEvents = events.filter(e => e.event_type !== 'not_an_event');
+
+  // Reset filter state
+  filterCategories = [];
+  activeFilterIds.clear();
+  filterEventsSource = actionableEvents;
+
+  if (actionableEvents.length === 0) {
+    agentResultsSection.style.display = 'block';
+    agentResultsList.innerHTML = '<p class="placeholder">No calendar events found on this page.</p>';
+    return;
+  }
+
+  // Run deterministic matching against user's Google Calendar
+  let matchResults: MatchResult[];
+  try {
+    matchResults = await deterministicMatchEvents(actionableEvents);
+  } catch (e) {
+    console.warn('[Ambient] Deterministic matching failed, showing all as new:', e);
+    matchResults = actionableEvents.map(event => ({
+      extracted_event: event,
+      match_type: 'no_match' as const,
+      match_data: { match_type: 'no_match' as const, matched_event: null, matched_event_id: null },
+    }));
+  }
+
+  lastMatchResults = matchResults;
+
+  agentResultsSection.style.display = 'block';
+  const h2 = agentResultsSection.querySelector('h2');
+  if (h2) h2.style.display = 'none';
+
+  const origMatchedResults = matchedResultsEl;
+  const origMatchedSection = matchedSection;
+  matchedResultsEl = agentResultsList;
+  matchedSection = agentResultsSection;
+
+  displayMatchResults(matchResults, true);
+
+  matchedResultsEl = origMatchedResults;
+  matchedSection = origMatchedSection;
+
+  // Inject filter button into the calendar row (between select and Add All)
+  if (actionableEvents.length > 1) {
+    const calRow = agentResultsList.querySelector('.import-calendar-row');
+    if (calRow) {
+      const addAllBtn = calRow.querySelector('.add-all-btn');
+      const filterBtn = document.createElement('button');
+      filterBtn.id = 'agent-filter-btn';
+      filterBtn.className = 'filter-btn';
+      filterBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg> Filter`;
+      if (addAllBtn) {
+        calRow.insertBefore(filterBtn, addAllBtn);
+      } else {
+        calRow.appendChild(filterBtn);
+      }
+      filterBtn.addEventListener('click', handleFilterClick);
+
+      const dropdown = document.createElement('div');
+      dropdown.id = 'agent-filter-dropdown';
+      dropdown.className = 'filter-dropdown';
+      dropdown.style.display = 'none';
+      calRow.parentElement!.insertBefore(dropdown, calRow.nextSibling);
+    }
+  }
+
+  // Auto-categorize when > 20 events
+  if (actionableEvents.length > 20) {
+    triggerAutoCategorization('agent');
+  }
+}
+

@@ -160,8 +160,39 @@ export async function createCalendar(summary: string): Promise<CalendarListEntry
   
   const created: CalendarListEntry = await response.json();
   console.log('[Ambient] Calendar created successfully:', created.summary, 'ID:', created.id);
-  
+
   return created;
+}
+
+/**
+ * Grant public read access to a calendar (anyone with the calendar id can subscribe).
+ *
+ * Used for per-trip calendars: the trip page's "Subscribe in Google" link relies on the
+ * calendar being publicly readable. Idempotent — re-inserting the default ACL is a no-op.
+ * Errors are logged and swallowed so a failed ACL set doesn't abort trip creation.
+ */
+export async function setCalendarPublicRead(calendarId: string): Promise<boolean> {
+  try {
+    const response = await calendarFetch(
+      `/calendars/${encodeURIComponent(calendarId)}/acl`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          role: 'reader',
+          scope: { type: 'default' },
+        }),
+      },
+    );
+    if (!response.ok) {
+      const txt = await response.text().catch(() => '');
+      console.warn('[Ambient] Failed to set public-read ACL:', response.status, txt);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.warn('[Ambient] Error setting public-read ACL:', e);
+    return false;
+  }
 }
 
 /**
@@ -287,8 +318,15 @@ export async function createEvent(
 ): Promise<CalendarEvent> {
   console.log('[Ambient] createEvent called with:', JSON.stringify(event, null, 2));
   console.log('[Ambient] Target calendar:', calendarId);
-  
-  const googleEvent = convertToGoogleEvent(event);
+
+  const ATTRIBUTION_LINK = 'https://chromewebstore.google.com/detail/ambient-messages-to-calen/fedgpihjlpnogfhomofkdiamhlklndmk';
+  const attribution = `\n\nCreated by <a href="${ATTRIBUTION_LINK}">Ambient Extension</a>`;
+  const eventWithAttribution: Partial<CalendarEvent> = {
+    ...event,
+    description: (event.description || '') + attribution,
+  };
+
+  const googleEvent = convertToGoogleEvent(eventWithAttribution);
   console.log('[Ambient] Converted to Google format:', JSON.stringify(googleEvent, null, 2));
   
   console.log('[Ambient] Making POST request to Calendar API...');
