@@ -2356,9 +2356,12 @@ function displayExtractedEvents(events: ExtractedEvent[]) {
   }
 
   if (futureEvents.length === 0 && pastEvents.length > 0) {
-    // Only past events - show them with a note
+    // Only past events - show them with a note. Still render the Create Trip banner: trip
+    // pages are useful for past trips too (you might scrape an old trip chat to build a
+    // shareable record after the fact, and the test corpus contains past-dated trips).
     resultsEl.innerHTML = `
       <div class="events-list">
+        ${renderCreateTripBanner(actionableEvents)}
         <p class="events-header">No upcoming events found</p>
         <div class="past-events-section">
           <button id="toggle-past-events" class="toggle-past-btn">Show ${pastEvents.length} past event(s)</button>
@@ -2370,6 +2373,7 @@ function displayExtractedEvents(events: ExtractedEvent[]) {
       </div>
     `;
     setupPastEventsToggle();
+    void setupCreateTripButton(actionableEvents);
     return;
   }
 
@@ -2394,7 +2398,7 @@ function displayExtractedEvents(events: ExtractedEvent[]) {
   if (pastEvents.length > 0) {
     setupPastEventsToggle();
   }
-  setupCreateTripButton(actionableEvents);
+  void setupCreateTripButton(actionableEvents);
 }
 
 // ---------- Create Trip Page flow ----------
